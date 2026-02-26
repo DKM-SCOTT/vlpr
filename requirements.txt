@@ -3,8 +3,9 @@ flask-login==0.6.2
 flask-sqlalchemy==3.0.5
 werkzeug==2.3.7
 numpy==1.26.4
-opencv-python==4.8.1.78
 opencv-python-headless==4.8.1.78
 easyocr==1.7.1
 sqlalchemy==2.0.19
 gunicorn==21.2.0
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
