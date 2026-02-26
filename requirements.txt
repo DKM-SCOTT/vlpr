@@ -7,3 +7,4 @@ opencv-python==4.8.1.78
 opencv-python-headless==4.8.1.78
 easyocr==1.7.1
 sqlalchemy==2.0.19
+gunicorn==21.2.0
