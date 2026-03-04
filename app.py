@@ -6,6 +6,7 @@ import uuid
 import csv
 import re
 import torch
+import gc  # Added for garbage collection
 from io import StringIO
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, make_response, send_from_directory
@@ -29,17 +30,33 @@ except ImportError:
 from database import db, User, Plate
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here-change-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///vlpr.db'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-in-production')
+# Use PostgreSQL if available (for Render), otherwise SQLite
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///vlpr.db')
+if database_url and database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PLATES_FOLDER'] = 'plates_detected'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
+# Check multiple possible model paths
+possible_paths = [
+    os.path.join('models', 'best.pt'),
+    os.path.join('model', 'best.pt'),
+    '/opt/render/project/src/models/best.pt',
+]
 
-app.config['MODEL_PATH'] = os.path.join('models', 'best.pt')  
+model_path = None
+for path in possible_paths:
+    if os.path.exists(path):
+        model_path = path
+        break
 
+app.config['MODEL_PATH'] = model_path or os.path.join('models', 'best.pt')
 
+# Create directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['PLATES_FOLDER'], exist_ok=True)
 os.makedirs('static/uploads', exist_ok=True)
@@ -57,6 +74,7 @@ login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
 
+# Initialize model variables as None - will load on demand
 yolo_model = None
 easyocr_reader = None
 
@@ -74,17 +92,21 @@ def load_yolo_model():
     """Load YOLOv8 model for plate detection using ultralytics"""
     global yolo_model
     try:
+        # Clean up existing model if any
+        if yolo_model is not None:
+            del yolo_model
+            gc.collect()
+        
         model_path = app.config['MODEL_PATH']
         print(f"Looking for YOLO model at: {model_path}")
         
         if os.path.exists(model_path):
             print(f"✅ Model file found! Loading YOLO model...")
             
-           
+            # Load model with minimal memory footprint
             yolo_model = YOLO(model_path)
             
-           
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            device = 'cpu'  # Force CPU to save memory
             print(f"Using device: {device}")
             
             print(f"✅ YOLO model loaded successfully from {model_path}")
@@ -104,9 +126,15 @@ def load_easyocr():
     """Load EasyOCR for text extraction"""
     global easyocr_reader
     try:
+        # Clean up existing reader if any
+        if easyocr_reader is not None:
+            del easyocr_reader
+            gc.collect()
+        
         import easyocr
         print("Loading EasyOCR reader for Kenyan plates...")
-        easyocr_reader = easyocr.Reader(['en'], gpu=False)
+        # Use /tmp for model storage to avoid filling up disk
+        easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
         print("✅ EasyOCR loaded successfully!")
         return True
     except ImportError:
@@ -115,7 +143,7 @@ def load_easyocr():
             import subprocess
             subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr"])
             import easyocr
-            easyocr_reader = easyocr.Reader(['en'], gpu=False)
+            easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
             print("✅ EasyOCR installed and loaded successfully!")
             return True
         except Exception as e:
@@ -125,14 +153,27 @@ def load_easyocr():
         print(f"⚠️ EasyOCR could not be loaded: {e}")
         return False
 
+# Don't load models at startup - they'll load on first request
+print("\n" + "="*50)
+print("STARTING VLPR SYSTEM (Optimized Mode)")
+print("="*50)
+print("Models will load on first detection request to save memory")
+print("="*50 + "\n")
 
-with app.app_context():
-    print("\n" + "="*50)
-    print("STARTING VLPR SYSTEM")
-    print("="*50)
-    load_yolo_model()
-    load_easyocr()
-    print("="*50 + "\n")
+@app.before_request
+def before_request():
+    """Check if models need to be loaded before certain requests"""
+    global yolo_model, easyocr_reader
+    
+    # Only load models for detection endpoints
+    if request.endpoint == 'detect' and request.method == 'POST':
+        if yolo_model is None:
+            print("Loading YOLO model on-demand...")
+            load_yolo_model()
+        
+        if easyocr_reader is None:
+            print("Loading EasyOCR on-demand...")
+            load_easyocr()
 
 @app.context_processor
 def utility_processor():
@@ -259,8 +300,12 @@ def detect():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
             
-           
+            # Models will be loaded by before_request hook
             result = detect_plate_yolo(filepath, filename)
+            
+            # Clean up uploaded file after processing to save disk space
+            if os.path.exists(filepath):
+                os.remove(filepath)
             
             if result['success']:
                
@@ -281,49 +326,8 @@ def detect():
     
     return render_template('detect.html')
 
-def preprocess_plate_for_ocr(plate_img):
-    """Enhanced preprocessing for Kenyan plates"""
-    try:
-        
-        if len(plate_img.shape) == 3:
-            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = plate_img
-        
-        
-        height, width = gray.shape
-        if width < 200:
-            scale = 200 / width
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            gray = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-        
-        
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        gray = clahe.apply(gray)
-        
-       
-        gray = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-        
-        return gray
-    except Exception as e:
-        print(f"Error in preprocessing: {e}")
-        return plate_img
-
-def is_valid_plate_candidate(text):
-    """Check if text looks like a valid plate candidate"""
-    if not text:
-        return False
-    
-    clean = text.upper().replace(' ', '')
-    
-    if len(clean) < 4 or len(clean) > 8:
-        return False
-    
-    has_letters = any(c.isalpha() for c in clean)
-    has_numbers = any(c.isdigit() for c in clean)
-    
-    return has_letters and has_numbers
+# Removed preprocess_plate_for_ocr function as it's not used
+# Removed is_valid_plate_candidate function as it's not used
 
 def clean_kenyan_plate_text(text):
     """Clean and format Kenyan license plate text"""
@@ -364,6 +368,15 @@ def detect_plate_yolo(image_path, filename):
     """Detect license plate using YOLO model and extract text with EasyOCR"""
     global yolo_model, easyocr_reader
     
+    # Ensure models are loaded
+    if yolo_model is None:
+        if not load_yolo_model():
+            return {'success': False, 'error': 'YOLO model not loaded'}
+    
+    if easyocr_reader is None:
+        if not load_easyocr():
+            return {'success': False, 'error': 'OCR not loaded'}
+    
     try:
         
         img = cv2.imread(image_path)
@@ -372,21 +385,16 @@ def detect_plate_yolo(image_path, filename):
         
         height, width = img.shape[:2]
         
-        
-        if yolo_model is None:
-            print("YOLO model not loaded, attempting to reload...")
-            if not load_yolo_model():
-                return {'success': False, 'error': 'YOLO model not loaded'}
-        
-        
         print(f"Running YOLO inference on {image_path}...")
-        results = yolo_model(image_path)
-        
+        # Run inference with minimal memory footprint
+        results = yolo_model(image_path, verbose=False)  # Disable verbose output
         
         if len(results) == 0 or len(results[0].boxes) == 0:
             print("No detections from YOLO")
+            # Clean up
+            del img
+            gc.collect()
             return {'success': False, 'error': 'No license plate detected'}
-        
         
         boxes = results[0].boxes
         confidences = boxes.conf.cpu().numpy()
@@ -399,7 +407,6 @@ def detect_plate_yolo(image_path, filename):
         
         print(f"Plate detected with confidence: {confidence:.2f} at [{x1}, {y1}, {x2}, {y2}]")
         
-        
         padding_x = int((x2 - x1) * 0.1)
         padding_y = int((y2 - y1) * 0.1)
         
@@ -408,15 +415,31 @@ def detect_plate_yolo(image_path, filename):
         x2 = min(width, x2 + padding_x)
         y2 = min(height, y2 + padding_y)
         
-        
-        plate_img = img[y1:y2, x1:x2]
-        
+        plate_img = img[y1:y2, x1:x2].copy()  # Create a copy to avoid reference issues
         
         plate_filename = f"plate_{filename}"
         plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
         cv2.imwrite(plate_path, plate_img)
         
-       
+        # Create a copy of original image for display (don't delete the original)
+        original_display_path = os.path.join(app.config['UPLOAD_FOLDER'], f"display_{filename}")
+        cv2.imwrite(original_display_path, img)
+        
+        # Create detected image with rectangle
+        img_with_rect = img.copy()
+        cv2.rectangle(img_with_rect, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        
+        # Add initial text (will be updated after OCR)
+        cv2.putText(img_with_rect, f"Plate: Processing...", (x1, y1-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(img_with_rect, f"Conf: {confidence*100:.1f}%", (x1, y1-35), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        rect_filename = f"rect_{filename}"
+        rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
+        cv2.imwrite(rect_path, img_with_rect)
+        
+        # OCR processing - simplified to save memory
         plate_text = "UNKNOWN"
         ocr_confidence = 0.0
         
@@ -424,37 +447,22 @@ def detect_plate_yolo(image_path, filename):
             try:
                 print("Starting OCR processing...")
                 
-                
+                # Simple preprocessing - keep it minimal
                 if len(plate_img.shape) == 3:
                     gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
                 else:
                     gray = plate_img
                 
-                print(f"Grayscale shape: {gray.shape}")
-                
-                
+                # Only resize if needed
                 h, w = gray.shape
-                scale = 400 / max(w, 1)
-                new_w = int(w * scale)
-                new_h = int(h * scale)
-                gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                
-                print(f"Resized to: {gray.shape}")
-                
-                
-                clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4,4))
-                gray = clahe.apply(gray)
-                
-                print("CLAHE applied")
-                
-                
-                processed_filename = f"processed_{filename}"
-                processed_path = os.path.join(app.config['PLATES_FOLDER'], processed_filename)
-                cv2.imwrite(processed_path, gray)
+                if w < 200:
+                    scale = 400 / max(w, 1)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                 
                 print("Running EasyOCR...")
                 
-               
                 ocr_results = easyocr_reader.readtext(
                     gray,
                     paragraph=False,
@@ -468,32 +476,22 @@ def detect_plate_yolo(image_path, filename):
                 print(f"OCR returned {len(ocr_results)} results")
                 
                 if ocr_results and len(ocr_results) > 0:
-                   
                     all_text = []
                     all_conf = []
                     
                     for result in ocr_results:
-                        
                         if len(result) >= 3:
                             text = result[1]
                             conf = result[2]
                             all_text.append(text)
                             all_conf.append(conf)
                             print(f"  Detected: '{text}' (conf: {conf:.2f})")
-                        elif len(result) == 2:
-                            
-                            if isinstance(result[0], str):
-                                all_text.append(result[0])
-                                all_conf.append(0.7)
-                                print(f"  Detected (text only): '{result[0]}'")
                     
                     if all_text:
-                        
                         plate_text = " ".join(all_text)
                         ocr_confidence = sum(all_conf) / len(all_conf) if all_conf else 0.7
                         print(f"📝 Combined text: '{plate_text}'")
                         
-                       
                         plate_text_before = plate_text
                         plate_text = clean_kenyan_plate_text(plate_text)
                         
@@ -510,8 +508,6 @@ def detect_plate_yolo(image_path, filename):
                     
             except Exception as e:
                 print(f"❌ OCR error: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
                 plate_text = "OCR_ERROR"
                 ocr_confidence = 0.0
         else:
@@ -519,28 +515,23 @@ def detect_plate_yolo(image_path, filename):
             plate_text = "OCR_NOT_AVAILABLE"
             ocr_confidence = 0.0
         
-        
+        # Calculate final confidence
         if ocr_confidence > 0:
             final_confidence = confidence * 0.4 + ocr_confidence * 0.6
         else:
             final_confidence = confidence * 0.5
         
+        # Update the detected image with the actual plate text
+        img_with_rect2 = cv2.imread(rect_path)
+        if img_with_rect2 is not None:
+            cv2.putText(img_with_rect2, f"Plate: {plate_text}", (x1, y1-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(img_with_rect2, f"Conf: {final_confidence*100:.1f}%", (x1, y1-35), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.imwrite(rect_path, img_with_rect2)
+            del img_with_rect2
         
-        img_with_rect = img.copy()
-        cv2.rectangle(img_with_rect, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        
-        
-        cv2.putText(img_with_rect, f"Plate: {plate_text}", (x1, y1-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(img_with_rect, f"Conf: {final_confidence*100:.1f}%", (x1, y1-35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
-        
-        rect_filename = f"rect_{filename}"
-        rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
-        cv2.imwrite(rect_path, img_with_rect)
-        
-        
+        # Check if Kenyan plate
         is_kenyan = False
         clean_plate = plate_text.replace(' ', '')
         for pattern in KENYAN_PLATE_PATTERNS:
@@ -548,12 +539,20 @@ def detect_plate_yolo(image_path, filename):
                 is_kenyan = True
                 break
         
+        # Clean up to free memory (but keep the display images)
+        del img
+        del plate_img
+        if 'gray' in locals():
+            del gray
+        if 'img_with_rect' in locals():
+            del img_with_rect
+        gc.collect()
+        
         return {
             'success': True,
-            'original_image': f'/uploads/{filename}',
+            'original_image': f'/uploads/display_{filename}',  # Use the preserved copy
             'detected_image': f'/uploads/{rect_filename}',
             'plate_image': f'/plates_detected/{plate_filename}',
-            'processed_image': f'/plates_detected/{processed_filename}',
             'plate_text': plate_text,
             'confidence': float(final_confidence),
             'yolo_confidence': float(confidence),
@@ -565,6 +564,8 @@ def detect_plate_yolo(image_path, filename):
         print(f"Error in detect_plate_yolo: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
+        # Clean up
+        gc.collect()
         return {'success': False, 'error': str(e)}
 
 @app.route('/plate/<int:plate_id>')
@@ -845,12 +846,7 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
         print("Database tables created successfully!")
-
-        if yolo_model is None:
-            load_yolo_model()
-        
-        if easyocr_reader is None:
-            load_easyocr()
-
+    
     port = int(os.environ.get("PORT", 5000))
+    # Don't load models at startup - they'll load on first detection
     app.run(host='0.0.0.0', port=port, debug=False)
