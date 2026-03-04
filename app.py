@@ -6,7 +6,8 @@ import uuid
 import csv
 import re
 import torch
-import gc  # Added for garbage collection
+import gc
+import tempfile
 from io import StringIO
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, make_response, send_from_directory
@@ -18,6 +19,16 @@ from PIL import Image
 import warnings
 warnings.filterwarnings('ignore')
 
+# CRITICAL FIX 1: Set matplotlib to use non-interactive backend BEFORE any other imports
+import matplotlib
+matplotlib.use('Agg')  # Must be called before importing pyplot
+import matplotlib.pyplot as plt
+plt.switch_backend('Agg')
+os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'  # Use temp directory for cache
+
+# CRITICAL FIX 2: Set environment variables for OpenCV and other libraries
+os.environ['OPENCV_OPENCL_RUNTIME'] = ''
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
 
 try:
     from ultralytics import YOLO
@@ -31,14 +42,15 @@ from database import db, User, Plate
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-in-production')
+
 # Use PostgreSQL if available (for Render), otherwise SQLite
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///vlpr.db')
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['PLATES_FOLDER'] = 'plates_detected'
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'  # Use /tmp for Render
+app.config['PLATES_FOLDER'] = '/tmp/plates_detected'  # Use /tmp for Render
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
 # Check multiple possible model paths
@@ -56,16 +68,21 @@ for path in possible_paths:
 
 app.config['MODEL_PATH'] = model_path or os.path.join('models', 'best.pt')
 
-# Create directories
+# Create directories (using /tmp for Render)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['PLATES_FOLDER'], exist_ok=True)
-os.makedirs('static/uploads', exist_ok=True)
-os.makedirs('static/plates_detected', exist_ok=True)
+os.makedirs('/tmp/static/uploads', exist_ok=True)
+os.makedirs('/tmp/static/plates_detected', exist_ok=True)
 os.makedirs('static/css', exist_ok=True)
 os.makedirs('static/js', exist_ok=True)
 os.makedirs('templates', exist_ok=True)
 os.makedirs('models', exist_ok=True)
 
+# Create symbolic links for static files if needed
+if not os.path.exists('static/uploads'):
+    os.symlink('/tmp/static/uploads', 'static/uploads')
+if not os.path.exists('static/plates_detected'):
+    os.symlink('/tmp/static/plates_detected', 'static/plates_detected')
 
 db.init_app(app)
 login_manager = LoginManager()
@@ -73,11 +90,9 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
-
 # Initialize model variables as None - will load on demand
 yolo_model = None
 easyocr_reader = None
-
 
 KENYAN_PLATE_PATTERNS = [
     r'^[A-Z]{3}\s?\d{3}[A-Z]$',      
@@ -159,6 +174,17 @@ print("STARTING VLPR SYSTEM (Optimized Mode)")
 print("="*50)
 print("Models will load on first detection request to save memory")
 print("="*50 + "\n")
+
+# FIX 3: Add a simple health check endpoint that doesn't load any models
+@app.route('/health')
+def health():
+    """Simple health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'time': str(datetime.now()),
+        'model_loaded': yolo_model is not None,
+        'ocr_loaded': easyocr_reader is not None
+    })
 
 @app.before_request
 def before_request():
@@ -260,12 +286,10 @@ def logout():
 def dashboard():
     plates = Plate.query.filter_by(user_id=current_user.id).order_by(Plate.detected_at.desc()).all()
     
-    
     today = datetime.now().date()
     today_count = sum(1 for plate in plates if plate.detected_at.date() == today)
     avg_confidence = sum(p.confidence for p in plates) / len(plates) if plates else 0
     
-   
     kenyan_plates = 0
     for plate in plates:
         clean_plate = plate.plate_number.replace(' ', '')
@@ -300,7 +324,6 @@ def detect():
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 
-                # Log that file was saved
                 print(f"✅ File saved to: {filepath}")
                 
                 # Check if models are loaded
@@ -309,6 +332,8 @@ def detect():
                     if not load_yolo_model():
                         print("❌ Failed to load YOLO model")
                         flash('Error loading detection model', 'danger')
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
                         return redirect(request.url)
                 
                 if easyocr_reader is None:
@@ -316,6 +341,8 @@ def detect():
                     if not load_easyocr():
                         print("❌ Failed to load EasyOCR")
                         flash('Error loading OCR model', 'danger')
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
                         return redirect(request.url)
                 
                 print("Starting plate detection...")
@@ -345,7 +372,6 @@ def detect():
                     return render_template('detect.html', result=result, success=True)
                 else:
                     print(f"❌ Detection failed: {result.get('error', 'Unknown error')}")
-                    # Clean up on failure
                     if os.path.exists(filepath):
                         os.remove(filepath)
                     flash(f'Detection failed: {result.get("error", "No license plate detected")}', 'warning')
@@ -359,9 +385,6 @@ def detect():
     
     return render_template('detect.html')
 
-# Removed preprocess_plate_for_ocr function as it's not used
-# Removed is_valid_plate_candidate function as it's not used
-
 def clean_kenyan_plate_text(text):
     """Clean and format Kenyan license plate text"""
     if not text:
@@ -369,7 +392,6 @@ def clean_kenyan_plate_text(text):
     
     text = re.sub(r'[^A-Za-z0-9]', '', text.upper())
     print(f"Cleaning plate text: '{text}'")
-    
     
     if len(text) == 7:
         formatted = f"{text[:3]} {text[3:6]} {text[6]}"
@@ -411,7 +433,6 @@ def detect_plate_yolo(image_path, filename):
             return {'success': False, 'error': 'OCR not loaded'}
     
     try:
-        
         img = cv2.imread(image_path)
         if img is None:
             return {'success': False, 'error': 'Could not read image'}
@@ -419,12 +440,10 @@ def detect_plate_yolo(image_path, filename):
         height, width = img.shape[:2]
         
         print(f"Running YOLO inference on {image_path}...")
-        # Run inference with minimal memory footprint
-        results = yolo_model(image_path, verbose=False)  # Disable verbose output
+        results = yolo_model(image_path, verbose=False)
         
         if len(results) == 0 or len(results[0].boxes) == 0:
             print("No detections from YOLO")
-            # Clean up
             del img
             gc.collect()
             return {'success': False, 'error': 'No license plate detected'}
@@ -448,13 +467,13 @@ def detect_plate_yolo(image_path, filename):
         x2 = min(width, x2 + padding_x)
         y2 = min(height, y2 + padding_y)
         
-        plate_img = img[y1:y2, x1:x2].copy()  # Create a copy to avoid reference issues
+        plate_img = img[y1:y2, x1:x2].copy()
         
         plate_filename = f"plate_{filename}"
         plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
         cv2.imwrite(plate_path, plate_img)
         
-        # Create a copy of original image for display (don't delete the original)
+        # Create a copy of original image for display
         original_display_path = os.path.join(app.config['UPLOAD_FOLDER'], f"display_{filename}")
         cv2.imwrite(original_display_path, img)
         
@@ -462,17 +481,11 @@ def detect_plate_yolo(image_path, filename):
         img_with_rect = img.copy()
         cv2.rectangle(img_with_rect, (x1, y1), (x2, y2), (0, 255, 0), 3)
         
-        # Add initial text (will be updated after OCR)
-        cv2.putText(img_with_rect, f"Plate: Processing...", (x1, y1-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(img_with_rect, f"Conf: {confidence*100:.1f}%", (x1, y1-35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
         rect_filename = f"rect_{filename}"
         rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
         cv2.imwrite(rect_path, img_with_rect)
         
-        # OCR processing - simplified to save memory
+        # OCR processing
         plate_text = "UNKNOWN"
         ocr_confidence = 0.0
         
@@ -480,7 +493,6 @@ def detect_plate_yolo(image_path, filename):
             try:
                 print("Starting OCR processing...")
                 
-                # Simple preprocessing - keep it minimal
                 if len(plate_img.shape) == 3:
                     gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
                 else:
@@ -572,7 +584,7 @@ def detect_plate_yolo(image_path, filename):
                 is_kenyan = True
                 break
         
-        # Clean up to free memory (but keep the display images)
+        # Clean up memory
         del img
         del plate_img
         if 'gray' in locals():
@@ -583,7 +595,7 @@ def detect_plate_yolo(image_path, filename):
         
         return {
             'success': True,
-            'original_image': f'/uploads/display_{filename}',  # Use the preserved copy
+            'original_image': f'/uploads/display_{filename}',
             'detected_image': f'/uploads/{rect_filename}',
             'plate_image': f'/plates_detected/{plate_filename}',
             'plate_text': plate_text,
@@ -597,7 +609,6 @@ def detect_plate_yolo(image_path, filename):
         print(f"Error in detect_plate_yolo: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        # Clean up
         gc.collect()
         return {'success': False, 'error': str(e)}
 
@@ -879,7 +890,7 @@ def model_status():
 def debug():
     """Debug endpoint to check system status"""
     import sys
-    import os
+    import shutil
     
     # Check model file
     model_exists = os.path.exists(app.config['MODEL_PATH'])
@@ -893,11 +904,12 @@ def debug():
     
     # Get disk space info
     try:
-        import shutil
         disk_usage = shutil.disk_usage('/')
         free_space_mb = disk_usage.free / (1024 * 1024)
+        total_space_mb = disk_usage.total / (1024 * 1024)
     except:
         free_space_mb = 'Unknown'
+        total_space_mb = 'Unknown'
     
     status = {
         'status': 'running',
@@ -912,12 +924,15 @@ def debug():
             'uploads_exists': os.path.exists(app.config['UPLOAD_FOLDER']),
             'uploads_writable': uploads_writable,
             'plates_exists': os.path.exists(app.config['PLATES_FOLDER']),
-            'plates_writable': plates_writable
+            'plates_writable': plates_writable,
+            'uploads_path': app.config['UPLOAD_FOLDER'],
+            'plates_path': app.config['PLATES_FOLDER']
         },
         'system': {
             'cwd': os.getcwd(),
             'python_version': sys.version,
             'free_disk_space_mb': free_space_mb,
+            'total_disk_space_mb': total_space_mb,
             'environment': os.environ.get('FLASK_ENV', 'production')
         }
     }
@@ -929,5 +944,4 @@ if __name__ == '__main__':
         print("Database tables created successfully!")
     
     port = int(os.environ.get("PORT", 5000))
-    # Don't load models at startup - they'll load on first detection
     app.run(host='0.0.0.0', port=port, debug=False)
