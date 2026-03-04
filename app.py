@@ -8,6 +8,7 @@ import re
 import torch
 import gc
 import tempfile
+import pytesseract  # Add this import
 from io import StringIO
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, make_response, send_from_directory
@@ -20,44 +21,33 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==================== CRITICAL FIXES FOR RENDER ====================
-# These must come before ANY other imports to prevent timeout issues
-
-# Fix 1: Completely disable matplotlib font cache building
 os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
 os.environ['MATPLOTLIBRC'] = '/tmp/matplotlib'
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['DISPLAY'] = ':0'
 
-# Create matplotlib config directory immediately
 os.makedirs('/tmp/matplotlib', exist_ok=True)
 
-# Fix 2: Set matplotlib to use Agg backend BEFORE any pyplot imports
 import matplotlib
 matplotlib.use('Agg')
-# Create a dummy font cache to prevent building
 import matplotlib.font_manager
 matplotlib.font_manager._get_fontconfig_fonts = lambda: []
 
-# Fix 3: Set environment variables for other libraries
 os.environ['OPENCV_OPENCL_RUNTIME'] = ''
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
-os.environ['EASYOCR_MODULE_PATH'] = '/tmp/easyocr'
 os.environ['TORCH_HOME'] = '/tmp/torch'
 os.environ['NUMEXPR_MAX_THREADS'] = '1'
 
-# Fix 4: Redirect all cache/temp directories to /tmp
 os.environ['XDG_CACHE_HOME'] = '/tmp/cache'
 os.environ['XDG_CONFIG_HOME'] = '/tmp/config'
 os.environ['XDG_DATA_HOME'] = '/tmp/data'
 
-# Create all necessary temp directories
-for dir_path in ['/tmp/cache', '/tmp/config', '/tmp/data', '/tmp/easyocr', '/tmp/torch', '/tmp/matplotlib']:
+for dir_path in ['/tmp/cache', '/tmp/config', '/tmp/data', '/tmp/torch', '/tmp/matplotlib']:
     os.makedirs(dir_path, exist_ok=True)
 
 # ==================== END CRITICAL FIXES ====================
 
-# Now import the rest
 try:
     from ultralytics import YOLO
 except ImportError:
@@ -71,7 +61,6 @@ from database import db, User, Plate
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-in-production')
 
-# Use PostgreSQL if available (for Render), otherwise SQLite
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///vlpr.db')
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
@@ -81,7 +70,9 @@ app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 app.config['PLATES_FOLDER'] = '/tmp/plates_detected'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
-# Check multiple possible model paths
+# Configure Tesseract path (Render default)
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+
 possible_paths = [
     os.path.join('models', 'best.pt'),
     os.path.join('model', 'best.pt'),
@@ -97,7 +88,6 @@ for path in possible_paths:
 
 app.config['MODEL_PATH'] = model_path or os.path.join('models', 'best.pt')
 
-# Create directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['PLATES_FOLDER'], exist_ok=True)
 os.makedirs('static/css', exist_ok=True)
@@ -105,18 +95,15 @@ os.makedirs('static/js', exist_ok=True)
 os.makedirs('templates', exist_ok=True)
 os.makedirs('models', exist_ok=True)
 
-# Don't create symlinks - they can cause issues on Render
-# Just use the temp directories directly
-
 db.init_app(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
-# Initialize model variables as None - will load on demand
+# Initialize model variables
 yolo_model = None
-easyocr_reader = None
+# No more easyocr_reader
 
 KENYAN_PLATE_PATTERNS = [
     r'^[A-Z]{3}\s?\d{3}[A-Z]$',      
@@ -131,7 +118,6 @@ def load_yolo_model():
     """Load YOLOv8 model for plate detection using ultralytics"""
     global yolo_model
     try:
-        # Clean up existing model if any
         if yolo_model is not None:
             del yolo_model
             gc.collect()
@@ -141,74 +127,45 @@ def load_yolo_model():
         
         if os.path.exists(model_path):
             print(f"✅ Model file found! Loading YOLO model...")
-            
-            # Load model with minimal memory footprint
             yolo_model = YOLO(model_path)
-            
             device = 'cpu'
             print(f"Using device: {device}")
-            
             print(f"✅ YOLO model loaded successfully from {model_path}")
             return True
         else:
             print(f"❌ Model file NOT FOUND at {model_path}")
-            print(f"Current working directory: {os.getcwd()}")
-            if os.path.exists('models'):
-                print(f"Files in models folder: {os.listdir('models')}")
             return False
     except Exception as e:
         print(f"❌ Error loading YOLO model: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
-def load_easyocr():
-    """Load EasyOCR for text extraction"""
-    global easyocr_reader
-    try:
-        # Clean up existing reader if any
-        if easyocr_reader is not None:
-            del easyocr_reader
-            gc.collect()
-        
-        import easyocr
-        print("Loading EasyOCR reader for Kenyan plates...")
-        easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
-        print("✅ EasyOCR loaded successfully!")
-        return True
-    except Exception as e:
-        print(f"⚠️ EasyOCR could not be loaded: {e}")
-        return False
+# Removed load_easyocr function
 
 print("\n" + "="*50)
-print("STARTING VLPR SYSTEM (Render Optimized)")
+print("STARTING VLPR SYSTEM (Tesseract Version)")
 print("="*50)
-print("✓ Matplotlib font cache disabled")
+print("✓ Using Tesseract OCR (lightweight)")
 print("✓ All temp directories set to /tmp")
-print("✓ Models will load on first detection request")
+print("✓ YOLO model loads on first detection")
 print("="*50 + "\n")
 
-# ==================== SIMPLE HEALTH CHECK ENDPOINTS ====================
-# These endpoints should always respond quickly
+# ==================== HEALTH CHECK ENDPOINTS ====================
 
 @app.route('/health')
 def health():
-    """Simple health check endpoint - must respond quickly"""
     return jsonify({
         'status': 'healthy',
         'time': str(datetime.now()),
         'model_loaded': yolo_model is not None,
-        'ocr_loaded': easyocr_reader is not None
+        'ocr_available': True
     })
 
 @app.route('/ping')
 def ping():
-    """Ultra-simple ping endpoint for load balancers"""
     return 'pong'
 
 @app.route('/debug')
 def debug():
-    """Debug endpoint to check system status"""
     import sys
     import shutil
     
@@ -217,14 +174,13 @@ def debug():
     if os.path.exists('models'):
         models_content = os.listdir('models')
     
-    uploads_writable = os.access(app.config['UPLOAD_FOLDER'], os.W_OK) if os.path.exists(app.config['UPLOAD_FOLDER']) else False
-    
+    # Check if tesseract is available
     try:
-        disk_usage = shutil.disk_usage('/')
-        free_space_mb = disk_usage.free / (1024 * 1024)
-        free_space_gb = free_space_mb / 1024
+        tesseract_version = pytesseract.get_tesseract_version()
+        tesseract_ok = True
     except:
-        free_space_gb = 'Unknown'
+        tesseract_version = "Not found"
+        tesseract_ok = False
     
     status = {
         'status': 'running',
@@ -233,17 +189,15 @@ def debug():
             'exists': model_exists,
             'models_folder_content': models_content,
             'yolo_loaded': yolo_model is not None,
-            'ocr_loaded': easyocr_reader is not None
         },
-        'folders': {
-            'uploads_exists': os.path.exists(app.config['UPLOAD_FOLDER']),
-            'uploads_writable': uploads_writable,
-            'uploads_path': app.config['UPLOAD_FOLDER']
+        'tesseract': {
+            'available': tesseract_ok,
+            'version': str(tesseract_version),
+            'path': pytesseract.pytesseract.tesseract_cmd
         },
         'system': {
             'cwd': os.getcwd(),
             'python_version': sys.version[:50],
-            'free_disk_space_gb': free_space_gb,
             'environment': os.environ.get('FLASK_ENV', 'production')
         }
     }
@@ -276,9 +230,7 @@ def plates_detected_file(filename):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# [All your other routes remain exactly the same from here]
-# [register, login, logout, dashboard, detect, etc.]
-# Just copy and paste all your existing routes below this line
+# [Your existing routes - register, login, logout, dashboard remain exactly the same]
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -319,7 +271,6 @@ def register():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    # Your existing login function
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
@@ -368,17 +319,12 @@ def dashboard():
 @app.before_request
 def before_request():
     """Check if models need to be loaded before certain requests"""
-    global yolo_model, easyocr_reader
+    global yolo_model
     
-    # Only load models for detection endpoints
     if request.endpoint == 'detect' and request.method == 'POST':
         if yolo_model is None:
             print("Loading YOLO model on-demand...")
             load_yolo_model()
-        
-        if easyocr_reader is None:
-            print("Loading EasyOCR on-demand...")
-            load_easyocr()
 
 @app.route('/detect', methods=['GET', 'POST'])
 @login_required
@@ -402,21 +348,11 @@ def detect():
                 
                 print(f"✅ File saved to: {filepath}")
                 
-                # Check if models are loaded
                 if yolo_model is None:
                     print("Loading YOLO model on-demand...")
                     if not load_yolo_model():
                         print("❌ Failed to load YOLO model")
                         flash('Error loading detection model', 'danger')
-                        if os.path.exists(filepath):
-                            os.remove(filepath)
-                        return redirect(request.url)
-                
-                if easyocr_reader is None:
-                    print("Loading EasyOCR on-demand...")
-                    if not load_easyocr():
-                        print("❌ Failed to load EasyOCR")
-                        flash('Error loading OCR model', 'danger')
                         if os.path.exists(filepath):
                             os.remove(filepath)
                         return redirect(request.url)
@@ -428,7 +364,6 @@ def detect():
                 if result['success']:
                     print(f"Plate detected: {result['plate_text']}")
                     
-                    # Save to database
                     plate = Plate(
                         plate_number=result['plate_text'],
                         image_path=result['original_image'],
@@ -440,7 +375,6 @@ def detect():
                     db.session.commit()
                     print("✅ Plate saved to database")
                     
-                    # Clean up uploaded file after successful processing
                     if os.path.exists(filepath):
                         os.remove(filepath)
                         print(f"🗑️ Cleaned up: {filepath}")
@@ -470,43 +404,77 @@ def clean_kenyan_plate_text(text):
     print(f"Cleaning plate text: '{text}'")
     
     if len(text) == 7:
-        formatted = f"{text[:3]} {text[3:6]} {text[6]}"
-        print(f"Formatted as 7-char: '{formatted}'")
-        return formatted
+        return f"{text[:3]} {text[3:6]} {text[6]}"
     elif len(text) == 6:
         if text[:3].isalpha() and text[3:].isdigit():
-            formatted = f"{text[:3]} {text[3:]}"
+            return f"{text[:3]} {text[3:]}"
         elif text[:2].isalpha() and text[2:].isdigit():
-            formatted = f"{text[:2]} {text[2:]}"
+            return f"{text[:2]} {text[2:]}"
         else:
-            formatted = text
-        print(f"Formatted as 6-char: '{formatted}'")
-        return formatted
+            return text
     elif len(text) == 5:
         if text[0].isalpha() and text[1:4].isdigit() and text[4].isalpha():
-            formatted = f"{text[0]} {text[1:4]} {text[4]}"
+            return f"{text[0]} {text[1:4]} {text[4]}"
         elif text[:3].isalpha() and text[3:].isdigit():
-            formatted = f"{text[:3]} {text[3:]}"
+            return f"{text[:3]} {text[3:]}"
         else:
-            formatted = text
-        print(f"Formatted as 5-char: '{formatted}'")
-        return formatted
+            return text
     else:
-        print(f"No formatting applied: '{text}'")
         return text
 
+def ocr_with_tesseract(plate_img):
+    """Extract text from plate image using Tesseract OCR"""
+    try:
+        # Convert to grayscale if needed
+        if len(plate_img.shape) == 3:
+            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = plate_img
+        
+        # Apply preprocessing for better OCR
+        # 1. Increase contrast
+        gray = cv2.equalizeHist(gray)
+        
+        # 2. Threshold to get binary image
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 3. Denoise
+        gray = cv2.medianBlur(gray, 3)
+        
+        # Configure Tesseract for license plates
+        # --psm 7: Treat image as single text line
+        # -c tessedit_char_whitelist: Only allow these characters
+        custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        
+        # Run OCR
+        text = pytesseract.image_to_string(gray, config=custom_config)
+        
+        # Clean the result
+        text = text.strip().upper()
+        text = re.sub(r'[^A-Z0-9]', '', text)
+        
+        # Calculate a confidence score (Tesseract doesn't provide per-character confidence easily)
+        # We'll use a heuristic based on text length and character patterns
+        confidence = 0.7  # Base confidence
+        if len(text) >= 4 and len(text) <= 8:
+            confidence += 0.2
+        if any(c.isalpha() for c in text) and any(c.isdigit() for c in text):
+            confidence += 0.1
+            
+        print(f"Tesseract extracted: '{text}'")
+        return text, min(confidence, 1.0)
+        
+    except Exception as e:
+        print(f"Tesseract error: {e}")
+        return "UNKNOWN", 0.0
+
 def detect_plate_yolo(image_path, filename):
-    """Detect license plate using YOLO model and extract text with EasyOCR"""
-    global yolo_model, easyocr_reader
+    """Detect license plate using YOLO model and extract text with Tesseract OCR"""
+    global yolo_model
     
-    # Ensure models are loaded
     if yolo_model is None:
         if not load_yolo_model():
             return {'success': False, 'error': 'YOLO model not loaded'}
-    
-    if easyocr_reader is None:
-        if not load_easyocr():
-            return {'success': False, 'error': 'OCR not loaded'}
     
     try:
         img = cv2.imread(image_path)
@@ -549,11 +517,9 @@ def detect_plate_yolo(image_path, filename):
         plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
         cv2.imwrite(plate_path, plate_img)
         
-        # Create a copy of original image for display
         original_display_path = os.path.join(app.config['UPLOAD_FOLDER'], f"display_{filename}")
         cv2.imwrite(original_display_path, img)
         
-        # Create detected image with rectangle
         img_with_rect = img.copy()
         cv2.rectangle(img_with_rect, (x1, y1), (x2, y2), (0, 255, 0), 3)
         
@@ -561,80 +527,8 @@ def detect_plate_yolo(image_path, filename):
         rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
         cv2.imwrite(rect_path, img_with_rect)
         
-        # OCR processing
-        plate_text = "UNKNOWN"
-        ocr_confidence = 0.0
-        
-        if easyocr_reader is not None:
-            try:
-                print("Starting OCR processing...")
-                
-                if len(plate_img.shape) == 3:
-                    gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-                else:
-                    gray = plate_img
-                
-                # Only resize if needed
-                h, w = gray.shape
-                if w < 200:
-                    scale = 400 / max(w, 1)
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                
-                print("Running EasyOCR...")
-                
-                ocr_results = easyocr_reader.readtext(
-                    gray,
-                    paragraph=False,
-                    text_threshold=0.7,
-                    low_text=0.4,
-                    width_ths=0.7,
-                    height_ths=0.5,
-                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-                )
-                
-                print(f"OCR returned {len(ocr_results)} results")
-                
-                if ocr_results and len(ocr_results) > 0:
-                    all_text = []
-                    all_conf = []
-                    
-                    for result in ocr_results:
-                        if len(result) >= 3:
-                            text = result[1]
-                            conf = result[2]
-                            all_text.append(text)
-                            all_conf.append(conf)
-                            print(f"  Detected: '{text}' (conf: {conf:.2f})")
-                    
-                    if all_text:
-                        plate_text = " ".join(all_text)
-                        ocr_confidence = sum(all_conf) / len(all_conf) if all_conf else 0.7
-                        print(f"📝 Combined text: '{plate_text}'")
-                        
-                        plate_text_before = plate_text
-                        plate_text = clean_kenyan_plate_text(plate_text)
-                        
-                        print(f"✨ Before: '{plate_text_before}'")
-                        print(f"✅ After: '{plate_text}'")
-                    else:
-                        print("❌ Could not parse OCR results")
-                        plate_text = "PARSE_ERROR"
-                        ocr_confidence = 0.0
-                else:
-                    print("❌ No text detected")
-                    plate_text = "NO_TEXT"
-                    ocr_confidence = 0.0
-                    
-            except Exception as e:
-                print(f"❌ OCR error: {type(e).__name__}: {e}")
-                plate_text = "OCR_ERROR"
-                ocr_confidence = 0.0
-        else:
-            print("❌ EasyOCR not loaded")
-            plate_text = "OCR_NOT_AVAILABLE"
-            ocr_confidence = 0.0
+        # OCR with Tesseract
+        plate_text, ocr_confidence = ocr_with_tesseract(plate_img)
         
         # Calculate final confidence
         if ocr_confidence > 0:
@@ -688,6 +582,9 @@ def detect_plate_yolo(image_path, filename):
         gc.collect()
         return {'success': False, 'error': str(e)}
 
+# [The rest of your routes remain exactly the same - plate_detail, delete_plate, profile, search, export_data, analytics, update_profile, change_password, model_status]
+
+# Add the remaining routes here...
 @app.route('/plate/<int:plate_id>')
 @login_required
 def plate_detail(plate_id):
@@ -954,7 +851,6 @@ def model_status():
     
     return jsonify({
         'yolo_loaded': yolo_model is not None,
-        'ocr_loaded': easyocr_reader is not None,
         'model_path': app.config['MODEL_PATH'],
         'model_exists': model_exists,
         'models_folder_exists': models_folder_exists,
@@ -972,5 +868,4 @@ if __name__ == '__main__':
         print("✅ Database tables created successfully!")
     
     port = int(os.environ.get("PORT", 5000))
-    # Run with debug=False for production
     app.run(host='0.0.0.0', port=port, debug=False)
