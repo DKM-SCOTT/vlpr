@@ -1,11 +1,11 @@
 import os
 import sys
-import subprocess
 import cv2
 import numpy as np
 import uuid
 import csv
 import re
+import torch
 from io import StringIO
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, make_response, send_from_directory
@@ -13,6 +13,18 @@ from flask_login import LoginManager, login_user, login_required, logout_user, c
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
+from PIL import Image
+import warnings
+warnings.filterwarnings('ignore')
+
+
+try:
+    from ultralytics import YOLO
+except ImportError:
+    print("Installing ultralytics...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics"])
+    from ultralytics import YOLO
 
 from database import db, User, Plate
 
@@ -23,6 +35,9 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PLATES_FOLDER'] = 'plates_detected'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
+
+
+app.config['MODEL_PATH'] = os.path.join('models', 'best.pt')  
 
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -42,26 +57,86 @@ login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
 
-reader = None  # global variable
+yolo_model = None
+easyocr_reader = None
 
-def get_easyocr_reader():
-    global reader
-    if reader is None:
+
+KENYAN_PLATE_PATTERNS = [
+    r'^[A-Z]{3}\s?\d{3}[A-Z]$',      
+    r'^[A-Z]{2}\s?\d{5}$',            
+    r'^[A-Z]{2}\s?\d{3}[A-Z]$',       
+    r'^[A-Z]{3}\s?\d{4}$',            
+    r'^[A-Z]{2}\s?\d{4}[A-Z]$',       
+    r'^CD\s?\d{1,4}$',                
+]
+
+def load_yolo_model():
+    """Load YOLOv8 model for plate detection using ultralytics"""
+    global yolo_model
+    try:
+        model_path = app.config['MODEL_PATH']
+        print(f"Looking for YOLO model at: {model_path}")
+        
+        if os.path.exists(model_path):
+            print(f"✅ Model file found! Loading YOLO model...")
+            
+           
+            yolo_model = YOLO(model_path)
+            
+           
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print(f"Using device: {device}")
+            
+            print(f"✅ YOLO model loaded successfully from {model_path}")
+            return True
+        else:
+            print(f"❌ Model file NOT FOUND at {model_path}")
+            print(f"Current working directory: {os.getcwd()}")
+            print(f"Files in models folder: {os.listdir('models') if os.path.exists('models') else 'models folder not found'}")
+            return False
+    except Exception as e:
+        print(f"❌ Error loading YOLO model: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def load_easyocr():
+    """Load EasyOCR for text extraction"""
+    global easyocr_reader
+    try:
+        import easyocr
+        print("Loading EasyOCR reader for Kenyan plates...")
+        easyocr_reader = easyocr.Reader(['en'], gpu=False)
+        print("✅ EasyOCR loaded successfully!")
+        return True
+    except ImportError:
+        print("⚠️ EasyOCR not installed. Installing now...")
         try:
-            print("Loading EasyOCR reader... (this may take a moment)")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr"])
             import easyocr
-            reader = easyocr.Reader(['en'], gpu=False)
-            print("✅ EasyOCR loaded successfully!")
+            easyocr_reader = easyocr.Reader(['en'], gpu=False)
+            print("✅ EasyOCR installed and loaded successfully!")
+            return True
         except Exception as e:
-            print(f"⚠️ EasyOCR could not be loaded: {e}")
-            reader = None
-    return reader
+            print(f"⚠️ EasyOCR could not be installed: {e}")
+            return False
+    except Exception as e:
+        print(f"⚠️ EasyOCR could not be loaded: {e}")
+        return False
 
+
+with app.app_context():
+    print("\n" + "="*50)
+    print("STARTING VLPR SYSTEM")
+    print("="*50)
+    load_yolo_model()
+    load_easyocr()
+    print("="*50 + "\n")
 
 @app.context_processor
 def utility_processor():
     return {'now': datetime.now}
-
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
@@ -71,28 +146,9 @@ def uploaded_file(filename):
 def plates_detected_file(filename):
     return send_from_directory(app.config['PLATES_FOLDER'], filename)
 
-
-cascade_path = os.path.join('models', 'haarcascade_russian_plate_number.xml')
-if os.path.exists(cascade_path):
-    plate_cascade = cv2.CascadeClassifier(cascade_path)
-    print("✅ Haar cascade loaded successfully!")
-else:
-    print(f"⚠️ Haar cascade file not found at {cascade_path}")
-    print("Downloading cascade file...")
-    try:
-        import urllib.request
-        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_russian_plate_number.xml"
-        urllib.request.urlretrieve(url, cascade_path)
-        plate_cascade = cv2.CascadeClassifier(cascade_path)
-        print("✅ Haar cascade downloaded and loaded successfully!")
-    except Exception as e:
-        print(f"❌ Failed to download cascade: {e}")
-        plate_cascade = None
-
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
-
 
 @app.route('/')
 def index():
@@ -105,23 +161,19 @@ def register():
         email = request.form.get('email')
         password = request.form.get('password')
         
-        
         if len(password) < 6:
             flash('Password must be at least 6 characters long', 'danger')
             return redirect(url_for('register'))
-        
         
         user = User.query.filter_by(username=username).first()
         if user:
             flash('Username already exists', 'danger')
             return redirect(url_for('register'))
         
-        
         email_exists = User.query.filter_by(email=email).first()
         if email_exists:
             flash('Email already registered', 'danger')
             return redirect(url_for('register'))
-        
         
         hashed_password = generate_password_hash(password)
         new_user = User(username=username, email=email, password=hashed_password)
@@ -170,11 +222,22 @@ def dashboard():
     
     today = datetime.now().date()
     today_count = sum(1 for plate in plates if plate.detected_at.date() == today)
-    
-    
     avg_confidence = sum(p.confidence for p in plates) / len(plates) if plates else 0
     
-    return render_template('dashboard.html', plates=plates, today_count=today_count, avg_confidence=avg_confidence)
+   
+    kenyan_plates = 0
+    for plate in plates:
+        clean_plate = plate.plate_number.replace(' ', '')
+        for pattern in KENYAN_PLATE_PATTERNS:
+            if re.match(pattern, clean_plate):
+                kenyan_plates += 1
+                break
+    
+    return render_template('dashboard.html', 
+                         plates=plates, 
+                         today_count=today_count, 
+                         avg_confidence=avg_confidence,
+                         kenyan_plates=kenyan_plates)
 
 @app.route('/detect', methods=['GET', 'POST'])
 @login_required
@@ -196,11 +259,11 @@ def detect():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
             
-            
-            result = detect_plate(filepath, filename)
+           
+            result = detect_plate_yolo(filepath, filename)
             
             if result['success']:
-                
+               
                 plate = Plate(
                     plate_number=result['plate_text'],
                     image_path=result['original_image'],
@@ -218,70 +281,291 @@ def detect():
     
     return render_template('detect.html')
 
-def detect_plate(image_path, filename):
-    """Detect license plate using Haar Cascade"""
+def preprocess_plate_for_ocr(plate_img):
+    """Enhanced preprocessing for Kenyan plates"""
+    try:
+        
+        if len(plate_img.shape) == 3:
+            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = plate_img
+        
+        
+        height, width = gray.shape
+        if width < 200:
+            scale = 200 / width
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            gray = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        
+        
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        gray = clahe.apply(gray)
+        
+       
+        gray = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+        
+        return gray
+    except Exception as e:
+        print(f"Error in preprocessing: {e}")
+        return plate_img
+
+def is_valid_plate_candidate(text):
+    """Check if text looks like a valid plate candidate"""
+    if not text:
+        return False
+    
+    clean = text.upper().replace(' ', '')
+    
+    if len(clean) < 4 or len(clean) > 8:
+        return False
+    
+    has_letters = any(c.isalpha() for c in clean)
+    has_numbers = any(c.isdigit() for c in clean)
+    
+    return has_letters and has_numbers
+
+def clean_kenyan_plate_text(text):
+    """Clean and format Kenyan license plate text"""
+    if not text:
+        return "UNKNOWN"
+    
+    text = re.sub(r'[^A-Za-z0-9]', '', text.upper())
+    print(f"Cleaning plate text: '{text}'")
+    
+    
+    if len(text) == 7:
+        formatted = f"{text[:3]} {text[3:6]} {text[6]}"
+        print(f"Formatted as 7-char: '{formatted}'")
+        return formatted
+    elif len(text) == 6:
+        if text[:3].isalpha() and text[3:].isdigit():
+            formatted = f"{text[:3]} {text[3:]}"
+        elif text[:2].isalpha() and text[2:].isdigit():
+            formatted = f"{text[:2]} {text[2:]}"
+        else:
+            formatted = text
+        print(f"Formatted as 6-char: '{formatted}'")
+        return formatted
+    elif len(text) == 5:
+        if text[0].isalpha() and text[1:4].isdigit() and text[4].isalpha():
+            formatted = f"{text[0]} {text[1:4]} {text[4]}"
+        elif text[:3].isalpha() and text[3:].isdigit():
+            formatted = f"{text[:3]} {text[3:]}"
+        else:
+            formatted = text
+        print(f"Formatted as 5-char: '{formatted}'")
+        return formatted
+    else:
+        print(f"No formatting applied: '{text}'")
+        return text
+
+def detect_plate_yolo(image_path, filename):
+    """Detect license plate using YOLO model and extract text with EasyOCR"""
+    global yolo_model, easyocr_reader
+    
     try:
         
         img = cv2.imread(image_path)
         if img is None:
-            return {'success': False}
-        
+            return {'success': False, 'error': 'Could not read image'}
         
         height, width = img.shape[:2]
         
         
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if yolo_model is None:
+            print("YOLO model not loaded, attempting to reload...")
+            if not load_yolo_model():
+                return {'success': False, 'error': 'YOLO model not loaded'}
         
         
-        plates = plate_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(30, 10),
-        )
-        
-        if len(plates) == 0:
-            return {'success': False}
+        print(f"Running YOLO inference on {image_path}...")
+        results = yolo_model(image_path)
         
         
-        (x, y, w, h) = plates[0]
+        if len(results) == 0 or len(results[0].boxes) == 0:
+            print("No detections from YOLO")
+            return {'success': False, 'error': 'No license plate detected'}
         
         
-        img_with_rect = img.copy()
-        cv2.rectangle(img_with_rect, (x, y), (x+w, y+h), (0, 255, 0), 3)
-        cv2.putText(img_with_rect, 'License Plate', (x, y-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        boxes = results[0].boxes
+        confidences = boxes.conf.cpu().numpy()
+        
+        best_idx = np.argmax(confidences)
+        box = boxes.xyxy[best_idx].cpu().numpy().astype(int)
+        confidence = float(confidences[best_idx])
+        
+        x1, y1, x2, y2 = box
+        
+        print(f"Plate detected with confidence: {confidence:.2f} at [{x1}, {y1}, {x2}, {y2}]")
         
         
-        rect_filename = 'rect_' + filename
-        rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
-        cv2.imwrite(rect_path, img_with_rect)
+        padding_x = int((x2 - x1) * 0.1)
+        padding_y = int((y2 - y1) * 0.1)
         
-       
-        plate_img = img[y:y+h, x:x+w]
-        plate_filename = 'plate_' + filename
+        x1 = max(0, x1 - padding_x)
+        y1 = max(0, y1 - padding_y)
+        x2 = min(width, x2 + padding_x)
+        y2 = min(height, y2 + padding_y)
+        
+        
+        plate_img = img[y1:y2, x1:x2]
+        
+        
+        plate_filename = f"plate_{filename}"
         plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
         cv2.imwrite(plate_path, plate_img)
         
+       
+        plate_text = "UNKNOWN"
+        ocr_confidence = 0.0
         
-        plate_text = f"PLATE-{uuid.uuid4().hex[:6].upper()}"
+        if easyocr_reader is not None:
+            try:
+                print("Starting OCR processing...")
+                
+                
+                if len(plate_img.shape) == 3:
+                    gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = plate_img
+                
+                print(f"Grayscale shape: {gray.shape}")
+                
+                
+                h, w = gray.shape
+                scale = 400 / max(w, 1)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                
+                print(f"Resized to: {gray.shape}")
+                
+                
+                clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4,4))
+                gray = clahe.apply(gray)
+                
+                print("CLAHE applied")
+                
+                
+                processed_filename = f"processed_{filename}"
+                processed_path = os.path.join(app.config['PLATES_FOLDER'], processed_filename)
+                cv2.imwrite(processed_path, gray)
+                
+                print("Running EasyOCR...")
+                
+               
+                ocr_results = easyocr_reader.readtext(
+                    gray,
+                    paragraph=False,
+                    text_threshold=0.7,
+                    low_text=0.4,
+                    width_ths=0.7,
+                    height_ths=0.5,
+                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+                )
+                
+                print(f"OCR returned {len(ocr_results)} results")
+                
+                if ocr_results and len(ocr_results) > 0:
+                   
+                    all_text = []
+                    all_conf = []
+                    
+                    for result in ocr_results:
+                        
+                        if len(result) >= 3:
+                            text = result[1]
+                            conf = result[2]
+                            all_text.append(text)
+                            all_conf.append(conf)
+                            print(f"  Detected: '{text}' (conf: {conf:.2f})")
+                        elif len(result) == 2:
+                            
+                            if isinstance(result[0], str):
+                                all_text.append(result[0])
+                                all_conf.append(0.7)
+                                print(f"  Detected (text only): '{result[0]}'")
+                    
+                    if all_text:
+                        
+                        plate_text = " ".join(all_text)
+                        ocr_confidence = sum(all_conf) / len(all_conf) if all_conf else 0.7
+                        print(f"📝 Combined text: '{plate_text}'")
+                        
+                       
+                        plate_text_before = plate_text
+                        plate_text = clean_kenyan_plate_text(plate_text)
+                        
+                        print(f"✨ Before: '{plate_text_before}'")
+                        print(f"✅ After: '{plate_text}'")
+                    else:
+                        print("❌ Could not parse OCR results")
+                        plate_text = "PARSE_ERROR"
+                        ocr_confidence = 0.0
+                else:
+                    print("❌ No text detected")
+                    plate_text = "NO_TEXT"
+                    ocr_confidence = 0.0
+                    
+            except Exception as e:
+                print(f"❌ OCR error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                plate_text = "OCR_ERROR"
+                ocr_confidence = 0.0
+        else:
+            print("❌ EasyOCR not loaded")
+            plate_text = "OCR_NOT_AVAILABLE"
+            ocr_confidence = 0.0
         
         
-        confidence = 0.85 + (np.random.random() * 0.14)
+        if ocr_confidence > 0:
+            final_confidence = confidence * 0.4 + ocr_confidence * 0.6
+        else:
+            final_confidence = confidence * 0.5
+        
+        
+        img_with_rect = img.copy()
+        cv2.rectangle(img_with_rect, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        
+        
+        cv2.putText(img_with_rect, f"Plate: {plate_text}", (x1, y1-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(img_with_rect, f"Conf: {final_confidence*100:.1f}%", (x1, y1-35), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        
+        rect_filename = f"rect_{filename}"
+        rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
+        cv2.imwrite(rect_path, img_with_rect)
+        
+        
+        is_kenyan = False
+        clean_plate = plate_text.replace(' ', '')
+        for pattern in KENYAN_PLATE_PATTERNS:
+            if re.match(pattern, clean_plate):
+                is_kenyan = True
+                break
         
         return {
             'success': True,
-            'original_image': url_for('static', filename=f'uploads/{filename}'),
-            'detected_image': url_for('static', filename=f'uploads/{rect_filename}'),
-            'plate_image': url_for('static', filename=f'plates_detected/{plate_filename}'),
+            'original_image': f'/uploads/{filename}',
+            'detected_image': f'/uploads/{rect_filename}',
+            'plate_image': f'/plates_detected/{plate_filename}',
+            'processed_image': f'/plates_detected/{processed_filename}',
             'plate_text': plate_text,
-            'confidence': float(confidence),
-            'coordinates': {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)},
-            'image_size': {'width': width, 'height': height}
+            'confidence': float(final_confidence),
+            'yolo_confidence': float(confidence),
+            'ocr_confidence': float(ocr_confidence),
+            'is_kenyan_plate': is_kenyan
         }
+        
     except Exception as e:
-        print(f"Error in plate detection: {e}")
-        return {'success': False}
+        print(f"Error in detect_plate_yolo: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'success': False, 'error': str(e)}
 
 @app.route('/plate/<int:plate_id>')
 @login_required
@@ -290,7 +574,15 @@ def plate_detail(plate_id):
     if plate.user_id != current_user.id:
         flash('Access denied', 'danger')
         return redirect(url_for('dashboard'))
-    return render_template('plate_detail.html', plate=plate)
+    
+    is_kenyan = False
+    clean_plate = plate.plate_number.replace(' ', '')
+    for pattern in KENYAN_PLATE_PATTERNS:
+        if re.match(pattern, clean_plate):
+            is_kenyan = True
+            break
+    
+    return render_template('plate_detail.html', plate=plate, is_kenyan=is_kenyan)
 
 @app.route('/delete_plate/<int:plate_id>', methods=['POST'])
 @login_required
@@ -298,7 +590,6 @@ def delete_plate(plate_id):
     plate = Plate.query.get_or_404(plate_id)
     if plate.user_id != current_user.id:
         return jsonify({'success': False, 'message': 'Access denied'})
-    
     
     try:
         if plate.image_path:
@@ -325,16 +616,25 @@ def delete_plate(plate_id):
 def profile():
     plates = Plate.query.filter_by(user_id=current_user.id).all()
     
-    
     now = datetime.now()
     month_start = datetime(now.year, now.month, 1)
     week_start = now - timedelta(days=now.weekday())
+    
+    kenyan_plates = 0
+    for plate in plates:
+        clean_plate = plate.plate_number.replace(' ', '')
+        for pattern in KENYAN_PLATE_PATTERNS:
+            if re.match(pattern, clean_plate):
+                kenyan_plates += 1
+                break
     
     stats = {
         'total_plates': len(plates),
         'month_plates': sum(1 for p in plates if p.detected_at >= month_start),
         'week_plates': sum(1 for p in plates if p.detected_at >= week_start),
-        'avg_confidence': sum(p.confidence for p in plates) / len(plates) if plates else 0
+        'avg_confidence': sum(p.confidence for p in plates) / len(plates) if plates else 0,
+        'kenyan_plates': kenyan_plates,
+        'foreign_plates': len(plates) - kenyan_plates
     }
     
     recent_plates = Plate.query.filter_by(user_id=current_user.id)\
@@ -349,14 +649,12 @@ def search():
     query = request.args.get('query', '')
     date_filter = request.args.get('date_filter', 'all')
     confidence_filter = request.args.get('confidence', 'all')
-    
+    plate_type = request.args.get('plate_type', 'all')
     
     plates_query = Plate.query.filter_by(user_id=current_user.id)
     
-   
     if query:
         plates_query = plates_query.filter(Plate.plate_number.contains(query.upper()))
-    
     
     now = datetime.now()
     if date_filter == 'today':
@@ -371,7 +669,6 @@ def search():
         year_start = datetime(now.year, 1, 1)
         plates_query = plates_query.filter(Plate.detected_at >= year_start)
     
-    
     if confidence_filter == '90':
         plates_query = plates_query.filter(Plate.confidence >= 0.9)
     elif confidence_filter == '80':
@@ -381,23 +678,44 @@ def search():
     
     plates = plates_query.order_by(Plate.detected_at.desc()).all()
     
-    return render_template('search.html', plates=plates, query=query)
+    if plate_type != 'all':
+        filtered_plates = []
+        for plate in plates:
+            clean_plate = plate.plate_number.replace(' ', '')
+            is_kenyan = False
+            for pattern in KENYAN_PLATE_PATTERNS:
+                if re.match(pattern, clean_plate):
+                    is_kenyan = True
+                    break
+            
+            if (plate_type == 'kenyan' and is_kenyan) or (plate_type == 'foreign' and not is_kenyan):
+                filtered_plates.append(plate)
+        plates = filtered_plates
+    
+    return render_template('search.html', plates=plates, query=query, plate_type=plate_type)
 
 @app.route('/export_data')
 @login_required
 def export_data():
     plates = Plate.query.filter_by(user_id=current_user.id).order_by(Plate.detected_at.desc()).all()
     
-    
     si = StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Plate Number', 'Detection Date', 'Confidence', 'Image Path'])
+    cw.writerow(['Plate Number', 'Detection Date', 'Confidence', 'Is Kenyan Plate', 'Image Path'])
     
     for plate in plates:
+        is_kenyan = False
+        clean_plate = plate.plate_number.replace(' ', '')
+        for pattern in KENYAN_PLATE_PATTERNS:
+            if re.match(pattern, clean_plate):
+                is_kenyan = True
+                break
+        
         cw.writerow([
             plate.plate_number,
             plate.detected_at.strftime('%Y-%m-%d %H:%M:%S'),
             f"{plate.confidence * 100:.1f}%",
+            'Yes' if is_kenyan else 'No',
             plate.image_path
         ])
     
@@ -412,27 +730,58 @@ def export_data():
 def analytics():
     plates = Plate.query.filter_by(user_id=current_user.id).order_by(Plate.detected_at).all()
     
-    
     dates = []
     counts = []
     confidences = []
+    kenyan_counts = []
+    foreign_counts = []
     
     if plates:
-        # Group by date
         date_counts = {}
+        date_kenyan = {}
+        date_foreign = {}
+        
         for plate in plates:
             date_str = plate.detected_at.strftime('%Y-%m-%d')
             date_counts[date_str] = date_counts.get(date_str, 0) + 1
+            
+            is_kenyan = False
+            clean_plate = plate.plate_number.replace(' ', '')
+            for pattern in KENYAN_PLATE_PATTERNS:
+                if re.match(pattern, clean_plate):
+                    is_kenyan = True
+                    break
+            
+            if is_kenyan:
+                date_kenyan[date_str] = date_kenyan.get(date_str, 0) + 1
+            else:
+                date_foreign[date_str] = date_foreign.get(date_str, 0) + 1
         
         dates = list(date_counts.keys())
         counts = list(date_counts.values())
-        confidences = [p.confidence for p in plates[-10:]]  # Last 10 confidences
+        kenyan_counts = [date_kenyan.get(d, 0) for d in dates]
+        foreign_counts = [date_foreign.get(d, 0) for d in dates]
+        confidences = [p.confidence for p in plates[-10:]]
+    
+    total_plates = len(plates)
+    kenyan_plates = 0
+    for plate in plates:
+        clean_plate = plate.plate_number.replace(' ', '')
+        for pattern in KENYAN_PLATE_PATTERNS:
+            if re.match(pattern, clean_plate):
+                kenyan_plates += 1
+                break
+    foreign_plates = total_plates - kenyan_plates
     
     return render_template('analytics.html', 
                          dates=dates, 
                          counts=counts, 
                          confidences=confidences,
-                         total_plates=len(plates))
+                         kenyan_counts=kenyan_counts,
+                         foreign_counts=foreign_counts,
+                         total_plates=total_plates,
+                         kenyan_plates=kenyan_plates,
+                         foreign_plates=foreign_plates)
 
 @app.route('/update_profile', methods=['POST'])
 @login_required
@@ -441,12 +790,10 @@ def update_profile():
     username = data.get('username')
     email = data.get('email')
     
-    
     if username != current_user.username:
         existing_user = User.query.filter_by(username=username).first()
         if existing_user:
             return jsonify({'success': False, 'message': 'Username already exists'})
-    
     
     if email != current_user.email:
         existing_email = User.query.filter_by(email=email).first()
@@ -477,209 +824,33 @@ def change_password():
     
     return jsonify({'success': True, 'message': 'Password changed successfully'})
 
-
-def preprocess_plate_for_ocr(plate_img):
-    """Preprocess plate image for better OCR results"""
-    try:
-        
-        if len(plate_img.shape) == 3:
-            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = plate_img
-        
-       
-        gray = cv2.equalizeHist(gray)
-        
-        
-        gray = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-        
-        
-        kernel = np.array([[-1,-1,-1],
-                           [-1, 9,-1],
-                           [-1,-1,-1]])
-        gray = cv2.filter2D(gray, -1, kernel)
-        
-        
-        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        return gray
-    except Exception as e:
-        print(f"Error in preprocessing: {e}")
-        return plate_img
-
-def clean_plate_text(text):
-    """Clean and format plate text"""
-    if not text:
-        return "UNKNOWN"
+@app.route('/model_status')
+@login_required
+def model_status():
+    model_exists = os.path.exists(app.config['MODEL_PATH'])
+    models_folder_exists = os.path.exists('models')
+    models_content = os.listdir('models') if models_folder_exists else []
     
-    
-    text = re.sub(r'[^A-Z0-9]', '', text.upper())
-    
-   
-    replacements = {
-        'O': '0', 'I': '1', 'Z': '2', 'S': '5', 'B': '8',
-        'G': '6', 'Q': '0', 'D': '0', 'L': '1', 'T': '7'
-    }
-    
-   
-    if len(text) >= 7:
-        text = text[:2] + ''.join([replacements.get(c, c) if i in [2,3] else c for i, c in enumerate(text[2:5], 2)]) + text[5:]
-    
-    return text
-
-def detect_plate_fallback(plate_img):
-    """Fallback method when OCR is not available - generate pattern-based plate number"""
-    try:
-        img_hash = hash(plate_img.tobytes()) % 1000000
-        import random
-        random.seed(img_hash)
-        
-        letters = ''.join(random.choices('ABCDEFGHJKLMNPRSTUVWXYZ', k=3))
-        numbers = ''.join(random.choices('0123456789', k=3))
-        plate_text = f"{letters}{numbers}"
-        
-        return plate_text, 0.75  
-    except:
-        return "PLATE-UNKNOWN", 0.5
-
-def detect_plate(image_path, filename):
-    """Detect license plate using Haar Cascade and read text with EasyOCR"""
-    try:
-
-        img = cv2.imread(image_path)
-        if img is None:
-            return {'success': False, 'error': 'Could not read image'}
-        
-        
-        height, width = img.shape[:2]
-        
-       
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        
-        if plate_cascade is None:
-            return {'success': False, 'error': 'Plate cascade not loaded'}
-        
-        plates = plate_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(100, 30), 
-            maxSize=(500, 150)   
-        )
-        
-        if len(plates) == 0:
-            return {'success': False, 'error': 'No license plate detected'}
-        
-       
-        largest_plate = max(plates, key=lambda rect: rect[2] * rect[3])
-        (x, y, w, h) = largest_plate
-        
-        
-        padding = int(w * 0.1)
-        x = max(0, x - padding)
-        y = max(0, y - padding)
-        w = min(width - x, w + 2 * padding)
-        h = min(height - y, h + 2 * padding)
-        
-       
-        plate_img = img[y:y+h, x:x+w]
-        
-       
-        processed_plate = preprocess_plate_for_ocr(plate_img)
-        
-        
-        debug_plate_path = os.path.join(app.config['PLATES_FOLDER'], f'debug_{filename}')
-        cv2.imwrite(debug_plate_path, processed_plate)
-        
-        
-        plate_text = "UNKNOWN"
-        confidence = 0.0
-        
-        if reader is not None:
-            try:
-                results = reader.readtext(processed_plate)
-                
-                if results:
-                    
-                    best_result = max(results, key=lambda x: x[2])
-                    plate_text = best_result[1]
-                    confidence = best_result[2]
-                    
-                    
-                    plate_text = clean_plate_text(plate_text)
-                else:
-                    
-                    results = reader.readtext(plate_img)
-                    if results:
-                        best_result = max(results, key=lambda x: x[2])
-                        plate_text = best_result[1]
-                        confidence = best_result[2] * 0.8  
-                        plate_text = clean_plate_text(plate_text)
-                    else:
-                        
-                        plate_text, confidence = detect_plate_fallback(plate_img)
-            except Exception as e:
-                print(f"OCR error: {e}")
-                plate_text, confidence = detect_plate_fallback(plate_img)
-        else:
-            
-            plate_text, confidence = detect_plate_fallback(plate_img)
-        
-        
-        img_with_rect = img.copy()
-        cv2.rectangle(img_with_rect, (x, y), (x+w, y+h), (0, 255, 0), 3)
-        
-        
-        cv2.putText(img_with_rect, f'Plate: {plate_text}', (x, y-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        
-        conf_text = f'Confidence: {confidence*100:.1f}%'
-        cv2.putText(img_with_rect, conf_text, (x, y-35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        
-        
-        rect_filename = 'rect_' + filename
-        rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
-        cv2.imwrite(rect_path, img_with_rect)
-        
-        
-        plate_filename = 'plate_' + filename
-        plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
-        cv2.imwrite(plate_path, plate_img)
-        
-        
-        processed_filename = 'processed_' + filename
-        processed_path = os.path.join(app.config['PLATES_FOLDER'], processed_filename)
-        cv2.imwrite(processed_path, processed_plate)
-        
-        return {
-            'success': True,
-            'original_image': f'/uploads/{filename}',
-            'detected_image': f'/uploads/{rect_filename}',
-            'plate_image': f'/plates_detected/{plate_filename}',
-            'processed_image': f'/plates_detected/{processed_filename}',
-            'plate_text': plate_text,
-            'confidence': float(confidence),
-            'coordinates': {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)},
-            'image_size': {'width': width, 'height': height},
-            'debug': True
-        }
-        
-    except Exception as e:
-        print(f"Error in plate detection: {e}")
-        import traceback
-        traceback.print_exc()
-        return {'success': False, 'error': str(e)}
-
+    return jsonify({
+        'yolo_loaded': yolo_model is not None,
+        'ocr_loaded': easyocr_reader is not None,
+        'model_path': app.config['MODEL_PATH'],
+        'model_exists': model_exists,
+        'models_folder_exists': models_folder_exists,
+        'models_content': models_content,
+        'working_directory': os.getcwd()
+    })
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
         print("Database tables created successfully!")
-
-    import os
-    port = int(os.environ.get("PORT", 5000))  # Use Render's port if provided
-    app.run(debug=True, host='0.0.0.0', port=port)
+        
+        if yolo_model is None:
+            load_yolo_model()
+        
+        if easyocr_reader is None:
+            load_easyocr()
     
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host='0.0.0.0', port=port)
