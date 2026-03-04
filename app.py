@@ -19,17 +19,45 @@ from PIL import Image
 import warnings
 warnings.filterwarnings('ignore')
 
-# CRITICAL FIX 1: Set matplotlib to use non-interactive backend BEFORE any other imports
-import matplotlib
-matplotlib.use('Agg')  # Must be called before importing pyplot
-import matplotlib.pyplot as plt
-plt.switch_backend('Agg')
-os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'  # Use temp directory for cache
+# ==================== CRITICAL FIXES FOR RENDER ====================
+# These must come before ANY other imports to prevent timeout issues
 
-# CRITICAL FIX 2: Set environment variables for OpenCV and other libraries
+# Fix 1: Completely disable matplotlib font cache building
+os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
+os.environ['MATPLOTLIBRC'] = '/tmp/matplotlib'
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['DISPLAY'] = ':0'
+
+# Create matplotlib config directory immediately
+os.makedirs('/tmp/matplotlib', exist_ok=True)
+
+# Fix 2: Set matplotlib to use Agg backend BEFORE any pyplot imports
+import matplotlib
+matplotlib.use('Agg')
+# Create a dummy font cache to prevent building
+import matplotlib.font_manager
+matplotlib.font_manager._get_fontconfig_fonts = lambda: []
+
+# Fix 3: Set environment variables for other libraries
 os.environ['OPENCV_OPENCL_RUNTIME'] = ''
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+os.environ['EASYOCR_MODULE_PATH'] = '/tmp/easyocr'
+os.environ['TORCH_HOME'] = '/tmp/torch'
+os.environ['NUMEXPR_MAX_THREADS'] = '1'
 
+# Fix 4: Redirect all cache/temp directories to /tmp
+os.environ['XDG_CACHE_HOME'] = '/tmp/cache'
+os.environ['XDG_CONFIG_HOME'] = '/tmp/config'
+os.environ['XDG_DATA_HOME'] = '/tmp/data'
+
+# Create all necessary temp directories
+for dir_path in ['/tmp/cache', '/tmp/config', '/tmp/data', '/tmp/easyocr', '/tmp/torch', '/tmp/matplotlib']:
+    os.makedirs(dir_path, exist_ok=True)
+
+# ==================== END CRITICAL FIXES ====================
+
+# Now import the rest
 try:
     from ultralytics import YOLO
 except ImportError:
@@ -49,8 +77,8 @@ if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = '/tmp/uploads'  # Use /tmp for Render
-app.config['PLATES_FOLDER'] = '/tmp/plates_detected'  # Use /tmp for Render
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
+app.config['PLATES_FOLDER'] = '/tmp/plates_detected'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
 # Check multiple possible model paths
@@ -58,6 +86,7 @@ possible_paths = [
     os.path.join('models', 'best.pt'),
     os.path.join('model', 'best.pt'),
     '/opt/render/project/src/models/best.pt',
+    'best.pt'
 ]
 
 model_path = None
@@ -68,21 +97,16 @@ for path in possible_paths:
 
 app.config['MODEL_PATH'] = model_path or os.path.join('models', 'best.pt')
 
-# Create directories (using /tmp for Render)
+# Create directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['PLATES_FOLDER'], exist_ok=True)
-os.makedirs('/tmp/static/uploads', exist_ok=True)
-os.makedirs('/tmp/static/plates_detected', exist_ok=True)
 os.makedirs('static/css', exist_ok=True)
 os.makedirs('static/js', exist_ok=True)
 os.makedirs('templates', exist_ok=True)
 os.makedirs('models', exist_ok=True)
 
-# Create symbolic links for static files if needed
-if not os.path.exists('static/uploads'):
-    os.symlink('/tmp/static/uploads', 'static/uploads')
-if not os.path.exists('static/plates_detected'):
-    os.symlink('/tmp/static/plates_detected', 'static/plates_detected')
+# Don't create symlinks - they can cause issues on Render
+# Just use the temp directories directly
 
 db.init_app(app)
 login_manager = LoginManager()
@@ -121,7 +145,7 @@ def load_yolo_model():
             # Load model with minimal memory footprint
             yolo_model = YOLO(model_path)
             
-            device = 'cpu'  # Force CPU to save memory
+            device = 'cpu'
             print(f"Using device: {device}")
             
             print(f"✅ YOLO model loaded successfully from {model_path}")
@@ -129,7 +153,8 @@ def load_yolo_model():
         else:
             print(f"❌ Model file NOT FOUND at {model_path}")
             print(f"Current working directory: {os.getcwd()}")
-            print(f"Files in models folder: {os.listdir('models') if os.path.exists('models') else 'models folder not found'}")
+            if os.path.exists('models'):
+                print(f"Files in models folder: {os.listdir('models')}")
             return False
     except Exception as e:
         print(f"❌ Error loading YOLO model: {e}")
@@ -148,37 +173,27 @@ def load_easyocr():
         
         import easyocr
         print("Loading EasyOCR reader for Kenyan plates...")
-        # Use /tmp for model storage to avoid filling up disk
         easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
         print("✅ EasyOCR loaded successfully!")
         return True
-    except ImportError:
-        print("⚠️ EasyOCR not installed. Installing now...")
-        try:
-            import subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr"])
-            import easyocr
-            easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
-            print("✅ EasyOCR installed and loaded successfully!")
-            return True
-        except Exception as e:
-            print(f"⚠️ EasyOCR could not be installed: {e}")
-            return False
     except Exception as e:
         print(f"⚠️ EasyOCR could not be loaded: {e}")
         return False
 
-# Don't load models at startup - they'll load on first request
 print("\n" + "="*50)
-print("STARTING VLPR SYSTEM (Optimized Mode)")
+print("STARTING VLPR SYSTEM (Render Optimized)")
 print("="*50)
-print("Models will load on first detection request to save memory")
+print("✓ Matplotlib font cache disabled")
+print("✓ All temp directories set to /tmp")
+print("✓ Models will load on first detection request")
 print("="*50 + "\n")
 
-# FIX 3: Add a simple health check endpoint that doesn't load any models
+# ==================== SIMPLE HEALTH CHECK ENDPOINTS ====================
+# These endpoints should always respond quickly
+
 @app.route('/health')
 def health():
-    """Simple health check endpoint"""
+    """Simple health check endpoint - must respond quickly"""
     return jsonify({
         'status': 'healthy',
         'time': str(datetime.now()),
@@ -186,43 +201,88 @@ def health():
         'ocr_loaded': easyocr_reader is not None
     })
 
-@app.before_request
-def before_request():
-    """Check if models need to be loaded before certain requests"""
-    global yolo_model, easyocr_reader
-    
-    # Only load models for detection endpoints
-    if request.endpoint == 'detect' and request.method == 'POST':
-        if yolo_model is None:
-            print("Loading YOLO model on-demand...")
-            load_yolo_model()
-        
-        if easyocr_reader is None:
-            print("Loading EasyOCR on-demand...")
-            load_easyocr()
+@app.route('/ping')
+def ping():
+    """Ultra-simple ping endpoint for load balancers"""
+    return 'pong'
 
-@app.context_processor
-def utility_processor():
-    return {'now': datetime.now}
+@app.route('/debug')
+def debug():
+    """Debug endpoint to check system status"""
+    import sys
+    import shutil
+    
+    model_exists = os.path.exists(app.config['MODEL_PATH'])
+    models_content = []
+    if os.path.exists('models'):
+        models_content = os.listdir('models')
+    
+    uploads_writable = os.access(app.config['UPLOAD_FOLDER'], os.W_OK) if os.path.exists(app.config['UPLOAD_FOLDER']) else False
+    
+    try:
+        disk_usage = shutil.disk_usage('/')
+        free_space_mb = disk_usage.free / (1024 * 1024)
+        free_space_gb = free_space_mb / 1024
+    except:
+        free_space_gb = 'Unknown'
+    
+    status = {
+        'status': 'running',
+        'model': {
+            'path': app.config['MODEL_PATH'],
+            'exists': model_exists,
+            'models_folder_content': models_content,
+            'yolo_loaded': yolo_model is not None,
+            'ocr_loaded': easyocr_reader is not None
+        },
+        'folders': {
+            'uploads_exists': os.path.exists(app.config['UPLOAD_FOLDER']),
+            'uploads_writable': uploads_writable,
+            'uploads_path': app.config['UPLOAD_FOLDER']
+        },
+        'system': {
+            'cwd': os.getcwd(),
+            'python_version': sys.version[:50],
+            'free_disk_space_gb': free_space_gb,
+            'environment': os.environ.get('FLASK_ENV', 'production')
+        }
+    }
+    return jsonify(status)
+
+# ==================== MAIN ROUTES ====================
+
+@app.route('/')
+def index():
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        return f"Template error: {e}", 500
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        return f"File not found: {e}", 404
 
 @app.route('/plates_detected/<filename>')
 def plates_detected_file(filename):
-    return send_from_directory(app.config['PLATES_FOLDER'], filename)
+    try:
+        return send_from_directory(app.config['PLATES_FOLDER'], filename)
+    except Exception as e:
+        return f"File not found: {e}", 404
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+# [All your other routes remain exactly the same from here]
+# [register, login, logout, dashboard, detect, etc.]
+# Just copy and paste all your existing routes below this line
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
+    # Your existing register function
     if request.method == 'POST':
         username = request.form.get('username')
         email = request.form.get('email')
@@ -259,6 +319,7 @@ def register():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # Your existing login function
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
@@ -303,6 +364,21 @@ def dashboard():
                          today_count=today_count, 
                          avg_confidence=avg_confidence,
                          kenyan_plates=kenyan_plates)
+
+@app.before_request
+def before_request():
+    """Check if models need to be loaded before certain requests"""
+    global yolo_model, easyocr_reader
+    
+    # Only load models for detection endpoints
+    if request.endpoint == 'detect' and request.method == 'POST':
+        if yolo_model is None:
+            print("Loading YOLO model on-demand...")
+            load_yolo_model()
+        
+        if easyocr_reader is None:
+            print("Loading EasyOCR on-demand...")
+            load_easyocr()
 
 @app.route('/detect', methods=['GET', 'POST'])
 @login_required
@@ -886,62 +962,15 @@ def model_status():
         'working_directory': os.getcwd()
     })
 
-@app.route('/debug')
-def debug():
-    """Debug endpoint to check system status"""
-    import sys
-    import shutil
-    
-    # Check model file
-    model_exists = os.path.exists(app.config['MODEL_PATH'])
-    models_content = []
-    if os.path.exists('models'):
-        models_content = os.listdir('models')
-    
-    # Check upload folders
-    uploads_writable = os.access(app.config['UPLOAD_FOLDER'], os.W_OK) if os.path.exists(app.config['UPLOAD_FOLDER']) else False
-    plates_writable = os.access(app.config['PLATES_FOLDER'], os.W_OK) if os.path.exists(app.config['PLATES_FOLDER']) else False
-    
-    # Get disk space info
-    try:
-        disk_usage = shutil.disk_usage('/')
-        free_space_mb = disk_usage.free / (1024 * 1024)
-        total_space_mb = disk_usage.total / (1024 * 1024)
-    except:
-        free_space_mb = 'Unknown'
-        total_space_mb = 'Unknown'
-    
-    status = {
-        'status': 'running',
-        'model': {
-            'path': app.config['MODEL_PATH'],
-            'exists': model_exists,
-            'models_folder_content': models_content,
-            'yolo_loaded': yolo_model is not None,
-            'ocr_loaded': easyocr_reader is not None
-        },
-        'folders': {
-            'uploads_exists': os.path.exists(app.config['UPLOAD_FOLDER']),
-            'uploads_writable': uploads_writable,
-            'plates_exists': os.path.exists(app.config['PLATES_FOLDER']),
-            'plates_writable': plates_writable,
-            'uploads_path': app.config['UPLOAD_FOLDER'],
-            'plates_path': app.config['PLATES_FOLDER']
-        },
-        'system': {
-            'cwd': os.getcwd(),
-            'python_version': sys.version,
-            'free_disk_space_mb': free_space_mb,
-            'total_disk_space_mb': total_space_mb,
-            'environment': os.environ.get('FLASK_ENV', 'production')
-        }
-    }
-    return jsonify(status)
+@app.context_processor
+def utility_processor():
+    return {'now': datetime.now}
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-        print("Database tables created successfully!")
+        print("✅ Database tables created successfully!")
     
     port = int(os.environ.get("PORT", 5000))
+    # Run with debug=False for production
     app.run(host='0.0.0.0', port=port, debug=False)
