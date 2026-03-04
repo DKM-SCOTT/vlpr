@@ -284,45 +284,78 @@ def dashboard():
 @login_required
 def detect():
     if request.method == 'POST':
-        if 'image' not in request.files:
-            flash('No image uploaded', 'danger')
-            return redirect(request.url)
-        
-        file = request.files['image']
-        
-        if file.filename == '':
-            flash('No image selected', 'danger')
-            return redirect(request.url)
-        
-        if file:
+        try:
+            if 'image' not in request.files:
+                flash('No image uploaded', 'danger')
+                return redirect(request.url)
             
-            filename = str(uuid.uuid4()) + '_' + secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
+            file = request.files['image']
             
-            # Models will be loaded by before_request hook
-            result = detect_plate_yolo(filepath, filename)
+            if file.filename == '':
+                flash('No image selected', 'danger')
+                return redirect(request.url)
             
-            # Clean up uploaded file after processing to save disk space
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            
-            if result['success']:
-               
-                plate = Plate(
-                    plate_number=result['plate_text'],
-                    image_path=result['original_image'],
-                    plate_image_path=result['plate_image'],
-                    confidence=result['confidence'],
-                    user_id=current_user.id
-                )
-                db.session.add(plate)
-                db.session.commit()
+            if file:
+                filename = str(uuid.uuid4()) + '_' + secure_filename(file.filename)
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(filepath)
                 
-                return render_template('detect.html', result=result, success=True)
-            else:
-                flash('No license plate detected in the image', 'warning')
-                return render_template('detect.html', error=True)
+                # Log that file was saved
+                print(f"✅ File saved to: {filepath}")
+                
+                # Check if models are loaded
+                if yolo_model is None:
+                    print("Loading YOLO model on-demand...")
+                    if not load_yolo_model():
+                        print("❌ Failed to load YOLO model")
+                        flash('Error loading detection model', 'danger')
+                        return redirect(request.url)
+                
+                if easyocr_reader is None:
+                    print("Loading EasyOCR on-demand...")
+                    if not load_easyocr():
+                        print("❌ Failed to load EasyOCR")
+                        flash('Error loading OCR model', 'danger')
+                        return redirect(request.url)
+                
+                print("Starting plate detection...")
+                result = detect_plate_yolo(filepath, filename)
+                print(f"Detection result: {result.get('success', False)}")
+                
+                if result['success']:
+                    print(f"Plate detected: {result['plate_text']}")
+                    
+                    # Save to database
+                    plate = Plate(
+                        plate_number=result['plate_text'],
+                        image_path=result['original_image'],
+                        plate_image_path=result['plate_image'],
+                        confidence=result['confidence'],
+                        user_id=current_user.id
+                    )
+                    db.session.add(plate)
+                    db.session.commit()
+                    print("✅ Plate saved to database")
+                    
+                    # Clean up uploaded file after successful processing
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        print(f"🗑️ Cleaned up: {filepath}")
+                    
+                    return render_template('detect.html', result=result, success=True)
+                else:
+                    print(f"❌ Detection failed: {result.get('error', 'Unknown error')}")
+                    # Clean up on failure
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    flash(f'Detection failed: {result.get("error", "No license plate detected")}', 'warning')
+                    return render_template('detect.html', error=True)
+        except Exception as e:
+            print(f"❌ Unhandled exception in detect route: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            flash(f'An error occurred: {str(e)}', 'danger')
+            return redirect(request.url)
     
     return render_template('detect.html')
 
@@ -841,6 +874,54 @@ def model_status():
         'models_content': models_content,
         'working_directory': os.getcwd()
     })
+
+@app.route('/debug')
+def debug():
+    """Debug endpoint to check system status"""
+    import sys
+    import os
+    
+    # Check model file
+    model_exists = os.path.exists(app.config['MODEL_PATH'])
+    models_content = []
+    if os.path.exists('models'):
+        models_content = os.listdir('models')
+    
+    # Check upload folders
+    uploads_writable = os.access(app.config['UPLOAD_FOLDER'], os.W_OK) if os.path.exists(app.config['UPLOAD_FOLDER']) else False
+    plates_writable = os.access(app.config['PLATES_FOLDER'], os.W_OK) if os.path.exists(app.config['PLATES_FOLDER']) else False
+    
+    # Get disk space info
+    try:
+        import shutil
+        disk_usage = shutil.disk_usage('/')
+        free_space_mb = disk_usage.free / (1024 * 1024)
+    except:
+        free_space_mb = 'Unknown'
+    
+    status = {
+        'status': 'running',
+        'model': {
+            'path': app.config['MODEL_PATH'],
+            'exists': model_exists,
+            'models_folder_content': models_content,
+            'yolo_loaded': yolo_model is not None,
+            'ocr_loaded': easyocr_reader is not None
+        },
+        'folders': {
+            'uploads_exists': os.path.exists(app.config['UPLOAD_FOLDER']),
+            'uploads_writable': uploads_writable,
+            'plates_exists': os.path.exists(app.config['PLATES_FOLDER']),
+            'plates_writable': plates_writable
+        },
+        'system': {
+            'cwd': os.getcwd(),
+            'python_version': sys.version,
+            'free_disk_space_mb': free_space_mb,
+            'environment': os.environ.get('FLASK_ENV', 'production')
+        }
+    }
+    return jsonify(status)
 
 if __name__ == '__main__':
     with app.app_context():
