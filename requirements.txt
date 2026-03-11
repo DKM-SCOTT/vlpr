@@ -16,12 +16,6 @@ torchvision==0.15.2+cpu
 ultralytics==8.0.196
 pytesseract==0.3.10
 
-# Data processing (if needed)
-pandas==2.0.3
-matplotlib==3.7.1
-scipy==1.10.1
-
-# Database
 psycopg2-binary==2.9.9
 python-dotenv==1.0.0
 SQLAlchemy==2.0.23

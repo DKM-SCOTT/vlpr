@@ -72,15 +72,20 @@
         left: 0;
         width: 100%;
         height: 100%;
-        background: rgba(255, 255, 255, 0.9);
+        background: rgba(255, 255, 255, 0.95);
         display: none;
         justify-content: center;
         align-items: center;
         z-index: 9999;
+        backdrop-filter: blur(5px);
       }
 
       .spinner-wrapper {
         text-align: center;
+        background: white;
+        padding: 30px 50px;
+        border-radius: 20px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
       }
 
       .detail-badge {
@@ -90,9 +95,51 @@
         border-radius: 10px;
         margin-bottom: 10px;
       }
+
+      .timeout-warning {
+        color: #dc3545;
+        font-size: 0.9rem;
+        margin-top: 10px;
+        animation: pulse 1.5s infinite;
+      }
+
+      @keyframes pulse {
+        0% {
+          opacity: 0.6;
+        }
+        50% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0.6;
+        }
+      }
+
+      .file-size-warning {
+        color: #856404;
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        padding: 10px;
+        border-radius: 5px;
+        margin-top: 10px;
+        display: none;
+      }
+
+      .camera-badge {
+        padding: 8px 15px;
+        border-radius: 20px;
+        font-size: 0.9rem;
+      }
     </style>
   </head>
   <body>
+    <!-- Store URL in data attribute for JavaScript -->
+    <div
+      id="app-data"
+      data-detect-url="{{ url_for('detect') }}"
+      style="display: none"
+    ></div>
+
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
       <div class="container">
         <a class="navbar-brand" href="/">
@@ -158,17 +205,29 @@
                   data-bs-dismiss="alert"
                 ></button>
               </div>
-              {% endfor %} {% endif %} {% endwith %} {% if not success and not
-              error %}
+              {% endfor %} {% endif %} {% endwith %}
 
+              <!-- File size warning -->
+              <div class="file-size-warning" id="fileSizeWarning">
+                <i class="fas fa-exclamation-triangle me-2"></i>
+                File too large! Please select an image under 10MB.
+              </div>
+
+              {% if not success and not error %}
               <div
                 class="upload-area"
                 onclick="document.getElementById('image').click()"
+                id="uploadArea"
               >
                 <i class="fas fa-cloud-upload-alt"></i>
                 <h4>Click to Upload Image</h4>
-                <p class="text-muted">or drag and drop</p>
-                <img id="preview" class="preview-image" style="display: none" />
+                <p class="text-muted">or drag and drop (Max: 10MB)</p>
+                <img
+                  id="preview"
+                  class="preview-image"
+                  style="display: none"
+                  alt="Preview"
+                />
               </div>
 
               <form
@@ -202,7 +261,6 @@
               </div>
 
               {% elif success %}
-
               <div class="alert alert-success">
                 <i class="fas fa-check-circle me-2"></i>License plate detected
                 successfully!
@@ -215,6 +273,7 @@
                     src="{{ result.original_image }}"
                     class="result-image"
                     alt="Original"
+                    onerror="this.src='/static/placeholder.jpg'"
                   />
                 </div>
                 <div class="col-md-6 mb-3">
@@ -223,6 +282,7 @@
                     src="{{ result.detected_image }}"
                     class="result-image"
                     alt="Detected"
+                    onerror="this.src='/static/placeholder.jpg'"
                   />
                 </div>
               </div>
@@ -235,13 +295,15 @@
                       src="{{ result.plate_image }}"
                       class="img-fluid"
                       style="max-height: 60px"
+                      alt="Extracted plate"
+                      onerror="this.style.display='none'"
                     />
                   </div>
                 </div>
                 <div class="col-md-6">
                   <div class="detail-badge">
                     <h6>Plate Number</h6>
-                    <h4>{{ result.plate_text }}</h4>
+                    <h4 class="text-uppercase">{{ result.plate_text }}</h4>
                   </div>
                   <div class="detail-badge">
                     <h6>Confidence</h6>
@@ -265,7 +327,6 @@
               </div>
 
               {% else %}
-
               <div class="text-center py-5">
                 <i
                   class="fas fa-exclamation-triangle fa-4x text-warning mb-3"
@@ -283,32 +344,48 @@
       </div>
     </div>
 
-    <div class="modal fade" id="cameraModal" tabindex="-1">
-      <div class="modal-dialog modal-lg">
+    <!-- Camera Modal -->
+    <div class="modal fade" id="cameraModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Capture Image</h5>
+            <h5 class="modal-title">
+              <i class="fas fa-camera me-2"></i>Capture Image
+            </h5>
             <button
               type="button"
               class="btn-close"
               data-bs-dismiss="modal"
+              aria-label="Close"
             ></button>
           </div>
           <div class="modal-body text-center">
-            <video id="video" width="100%" height="auto" autoplay></video>
-            <canvas id="canvas" style="display: none"></canvas>
+            <div class="camera-container position-relative">
+              <video
+                id="video"
+                width="100%"
+                height="auto"
+                autoplay
+                playsinline
+              ></video>
+              <canvas id="canvas" style="display: none"></canvas>
+            </div>
 
-            <div class="mt-3 d-flex justify-content-center gap-2">
+            <div class="mt-3 d-flex justify-content-center gap-3">
               <button
                 type="button"
-                class="btn btn-sm btn-outline-primary"
+                class="btn btn-outline-primary"
                 onclick="switchCamera()"
+                id="switchCameraBtn"
               >
-                <i class="fas fa-sync-alt me-1"></i> Switch Camera
+                <i class="fas fa-sync-alt me-1"></i> Switch
               </button>
-              <span id="cameraType" class="badge bg-info align-self-center"
-                >Rear Camera</span
+              <span
+                id="cameraType"
+                class="badge bg-info camera-badge align-self-center"
               >
+                Rear Camera
+              </span>
             </div>
           </div>
           <div class="modal-footer">
@@ -323,6 +400,7 @@
               type="button"
               class="btn btn-primary"
               onclick="captureImage()"
+              id="captureBtn"
             >
               <i class="fas fa-camera me-2"></i>Capture
             </button>
@@ -331,129 +409,384 @@
       </div>
     </div>
 
+    <!-- Loading Overlay -->
     <div class="loading-overlay" id="loadingOverlay">
       <div class="spinner-wrapper">
-        <div class="spinner-border text-primary" role="status">
+        <div
+          class="spinner-border text-primary"
+          style="width: 3rem; height: 3rem"
+          role="status"
+        >
           <span class="visually-hidden">Loading...</span>
         </div>
-        <p class="mt-3">Processing image...</p>
+        <p class="mt-3 mb-0">Processing image...</p>
+        <p class="text-muted small mb-2">This may take up to 30 seconds</p>
+        <div id="timeoutWarning" class="timeout-warning" style="display: none">
+          <i class="fas fa-exclamation-circle me-1"></i>
+          Taking longer than expected. Please wait...
+        </div>
       </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
     <script>
-      document.getElementById("image").onchange = function (e) {
-        const reader = new FileReader();
-        reader.onload = function (e) {
-          const preview = document.getElementById("preview");
-          preview.src = e.target.result;
-          preview.style.display = "block";
-        };
-        reader.readAsDataURL(this.files[0]);
-      };
+      (function () {
+        "use strict";
 
-      document.getElementById("uploadForm").onsubmit = function () {
-        document.getElementById("loadingOverlay").style.display = "flex";
-      };
+        // Get detect URL from data attribute
+        const appData = document.getElementById("app-data");
+        const detectUrl = appData ? appData.dataset.detectUrl : "/detect";
 
-      let video = document.getElementById("video");
-      let canvas = document.getElementById("canvas");
-      let cameraModal;
-      let currentStream = null;
-      let currentFacingMode = "environment";
-      function openCamera() {
-        cameraModal = new bootstrap.Modal(
-          document.getElementById("cameraModal")
-        );
-        cameraModal.show();
-
-        startCamera(currentFacingMode);
-      }
-
-      function startCamera(facingMode) {
-        if (currentStream) {
-          currentStream.getTracks().forEach((track) => track.stop());
-        }
-
-        const constraints = {
-          video: { facingMode: facingMode },
-          audio: false,
+        // DOM Elements
+        const elements = {
+          imageInput: document.getElementById("image"),
+          preview: document.getElementById("preview"),
+          uploadForm: document.getElementById("uploadForm"),
+          loadingOverlay: document.getElementById("loadingOverlay"),
+          timeoutWarning: document.getElementById("timeoutWarning"),
+          fileSizeWarning: document.getElementById("fileSizeWarning"),
+          submitBtn: document.getElementById("submitBtn"),
+          uploadArea: document.getElementById("uploadArea"),
+          cameraModal: document.getElementById("cameraModal"),
+          video: document.getElementById("video"),
+          canvas: document.getElementById("canvas"),
+          cameraType: document.getElementById("cameraType"),
+          switchCameraBtn: document.getElementById("switchCameraBtn"),
+          captureBtn: document.getElementById("captureBtn"),
         };
 
-        navigator.mediaDevices
-          .getUserMedia(constraints)
-          .then((stream) => {
-            currentStream = stream;
-            video.srcObject = stream;
+        // State variables
+        let cameraModalInstance = null;
+        let currentStream = null;
+        let currentFacingMode = "environment";
+        let timeoutTimer = null;
 
-            const cameraType = document.getElementById("cameraType");
-            if (cameraType) {
-              cameraType.textContent =
-                facingMode === "environment" ? "Rear Camera" : "Front Camera";
-              cameraType.className =
-                facingMode === "environment"
-                  ? "badge bg-info"
-                  : "badge bg-success";
+        // ========== FILE UPLOAD HANDLING ==========
+        if (elements.imageInput) {
+          elements.imageInput.addEventListener("change", function (e) {
+            const file = e.target.files[0];
+
+            // Reset warnings
+            if (elements.fileSizeWarning) {
+              elements.fileSizeWarning.style.display = "none";
             }
-          })
-          .catch((err) => {
-            alert("Could not access camera: " + err.message);
+
+            if (file) {
+              // Check file size (10MB limit)
+              if (file.size > 10 * 1024 * 1024) {
+                if (elements.fileSizeWarning) {
+                  elements.fileSizeWarning.style.display = "block";
+                }
+                this.value = ""; // Clear input
+                if (elements.preview) {
+                  elements.preview.style.display = "none";
+                }
+                return;
+              }
+
+              // Show preview
+              const reader = new FileReader();
+              reader.onload = function (e) {
+                if (elements.preview) {
+                  elements.preview.src = e.target.result;
+                  elements.preview.style.display = "block";
+                }
+              };
+              reader.readAsDataURL(file);
+            }
           });
-      }
-
-      function switchCamera() {
-        currentFacingMode =
-          currentFacingMode === "environment" ? "user" : "environment";
-        startCamera(currentFacingMode);
-      }
-
-      function captureImage() {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext("2d").drawImage(video, 0, 0);
-
-        if (currentStream) {
-          currentStream.getTracks().forEach((track) => track.stop());
-          currentStream = null;
         }
 
-        canvas.toBlob((blob) => {
-          const file = new File([blob], "camera_capture.jpg", {
-            type: "image/jpeg",
+        // ========== FORM SUBMISSION ==========
+        if (elements.uploadForm) {
+          elements.uploadForm.addEventListener("submit", function (e) {
+            // Check if file is selected
+            if (!elements.imageInput || !elements.imageInput.files.length) {
+              e.preventDefault();
+              alert("Please select an image first");
+              return;
+            }
+
+            // Show loading overlay
+            if (elements.loadingOverlay) {
+              elements.loadingOverlay.style.display = "flex";
+            }
+
+            // Disable submit button to prevent double submission
+            if (elements.submitBtn) {
+              elements.submitBtn.disabled = true;
+            }
+
+            // Show timeout warning after 15 seconds
+            timeoutTimer = setTimeout(() => {
+              if (elements.timeoutWarning) {
+                elements.timeoutWarning.style.display = "block";
+              }
+            }, 15000);
           });
+        }
 
-          const formData = new FormData();
-          formData.append("image", file);
+        // ========== CAMERA FUNCTIONS ==========
+        window.openCamera = function () {
+          // Initialize modal if not already done
+          if (!cameraModalInstance && elements.cameraModal) {
+            cameraModalInstance = new bootstrap.Modal(elements.cameraModal);
+          }
 
-          document.getElementById("loadingOverlay").style.display = "flex";
+          if (cameraModalInstance) {
+            cameraModalInstance.show();
 
-          fetch('{{ url_for("detect") }}', {
-            method: "POST",
-            body: formData,
-          })
-            .then((response) => response.text())
-            .then((html) => {
-              document.open();
-              document.write(html);
-              document.close();
+            // Small delay to ensure modal is visible
+            setTimeout(() => {
+              startCamera(currentFacingMode);
+            }, 500);
+          }
+        };
+
+        function startCamera(facingMode) {
+          // Stop any existing stream
+          if (currentStream) {
+            currentStream.getTracks().forEach((track) => {
+              track.stop();
+            });
+            currentStream = null;
+          }
+
+          // Check browser support
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert(
+              "Your browser does not support camera access. Please use a modern browser like Chrome, Firefox, or Safari."
+            );
+            return;
+          }
+
+          const constraints = {
+            video: {
+              facingMode: facingMode,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          };
+
+          navigator.mediaDevices
+            .getUserMedia(constraints)
+            .then((stream) => {
+              currentStream = stream;
+              if (elements.video) {
+                elements.video.srcObject = stream;
+              }
+
+              // Update camera type badge
+              if (elements.cameraType) {
+                elements.cameraType.textContent =
+                  facingMode === "environment" ? "Rear Camera" : "Front Camera";
+                elements.cameraType.className =
+                  facingMode === "environment"
+                    ? "badge bg-info camera-badge align-self-center"
+                    : "badge bg-success camera-badge align-self-center";
+              }
             })
             .catch((err) => {
-              alert("Error processing image: " + err.message);
-              document.getElementById("loadingOverlay").style.display = "none";
+              console.error("Camera error:", err);
+              let errorMessage = "Could not access camera: ";
+
+              switch (err.name) {
+                case "NotAllowedError":
+                case "PermissionDeniedError":
+                  errorMessage +=
+                    "Camera permission denied. Please allow camera access.";
+                  break;
+                case "NotFoundError":
+                case "DevicesNotFoundError":
+                  errorMessage += "No camera found on this device.";
+                  break;
+                case "NotReadableError":
+                case "TrackStartError":
+                  errorMessage +=
+                    "Camera is already in use by another application.";
+                  break;
+                default:
+                  errorMessage += err.message;
+              }
+
+              alert(errorMessage);
+
+              // Close modal if camera fails
+              if (cameraModalInstance) {
+                cameraModalInstance.hide();
+              }
             });
-        }, "image/jpeg");
+        }
 
-        cameraModal.hide();
-      }
+        window.switchCamera = function () {
+          currentFacingMode =
+            currentFacingMode === "environment" ? "user" : "environment";
+          startCamera(currentFacingMode);
+        };
 
-      document
-        .getElementById("cameraModal")
-        .addEventListener("hidden.bs.modal", function () {
+        window.captureImage = function () {
+          if (!elements.video || !elements.video.videoWidth) {
+            alert("Camera is not ready. Please try again.");
+            return;
+          }
+
+          // Set canvas dimensions
+          elements.canvas.width = elements.video.videoWidth;
+          elements.canvas.height = elements.video.videoHeight;
+
+          // Draw video frame
+          const context = elements.canvas.getContext("2d");
+          context.drawImage(
+            elements.video,
+            0,
+            0,
+            elements.canvas.width,
+            elements.canvas.height
+          );
+
+          // Stop camera stream
           if (currentStream) {
             currentStream.getTracks().forEach((track) => track.stop());
             currentStream = null;
           }
+
+          // Hide modal
+          if (cameraModalInstance) {
+            cameraModalInstance.hide();
+          }
+
+          // Show loading
+          if (elements.loadingOverlay) {
+            elements.loadingOverlay.style.display = "flex";
+          }
+
+          // Show timeout warning
+          timeoutTimer = setTimeout(() => {
+            if (elements.timeoutWarning) {
+              elements.timeoutWarning.style.display = "block";
+            }
+          }, 15000);
+
+          // Convert canvas to blob and submit
+          elements.canvas.toBlob(
+            (blob) => {
+              const file = new File([blob], "camera_capture.jpg", {
+                type: "image/jpeg",
+              });
+
+              const formData = new FormData();
+              formData.append("image", file);
+
+              // Submit via fetch
+              fetch(detectUrl, {
+                method: "POST",
+                body: formData,
+              })
+                .then((response) => {
+                  if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                  }
+                  return response.text();
+                })
+                .then((html) => {
+                  // Replace page content
+                  document.open();
+                  document.write(html);
+                  document.close();
+                })
+                .catch((err) => {
+                  console.error("Upload error:", err);
+                  alert("Error processing image: " + err.message);
+                  if (elements.loadingOverlay) {
+                    elements.loadingOverlay.style.display = "none";
+                  }
+                  clearTimeout(timeoutTimer);
+                });
+            },
+            "image/jpeg",
+            0.92
+          );
+        };
+
+        // ========== MODAL CLEANUP ==========
+        if (elements.cameraModal) {
+          elements.cameraModal.addEventListener("hidden.bs.modal", function () {
+            if (currentStream) {
+              currentStream.getTracks().forEach((track) => track.stop());
+              currentStream = null;
+            }
+          });
+        }
+
+        // ========== DRAG AND DROP SUPPORT ==========
+        if (elements.uploadArea) {
+          ["dragenter", "dragover", "dragleave", "drop"].forEach(
+            (eventName) => {
+              elements.uploadArea.addEventListener(
+                eventName,
+                preventDefaults,
+                false
+              );
+            }
+          );
+
+          function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+
+          elements.uploadArea.addEventListener("drop", handleDrop, false);
+        }
+
+        function handleDrop(e) {
+          const dt = e.dataTransfer;
+          const files = dt.files;
+
+          if (files.length && elements.imageInput) {
+            // Check file size
+            if (files[0].size > 10 * 1024 * 1024) {
+              if (elements.fileSizeWarning) {
+                elements.fileSizeWarning.style.display = "block";
+              }
+              return;
+            }
+
+            elements.imageInput.files = files;
+
+            // Trigger change event
+            const event = new Event("change", { bubbles: true });
+            elements.imageInput.dispatchEvent(event);
+          }
+        }
+
+        // ========== CLEANUP TIMEOUT ON PAGE LOAD ==========
+        window.addEventListener("load", function () {
+          if (timeoutTimer) {
+            clearTimeout(timeoutTimer);
+          }
+          if (elements.loadingOverlay) {
+            elements.loadingOverlay.style.display = "none";
+          }
+          if (elements.submitBtn) {
+            elements.submitBtn.disabled = false;
+          }
         });
+
+        // ========== HANDLE BACK BUTTON ==========
+        window.addEventListener("pageshow", function (event) {
+          if (event.persisted) {
+            if (elements.loadingOverlay) {
+              elements.loadingOverlay.style.display = "none";
+            }
+            if (elements.submitBtn) {
+              elements.submitBtn.disabled = false;
+            }
+            clearTimeout(timeoutTimer);
+          }
+        });
+      })();
     </script>
   </body>
 </html>
