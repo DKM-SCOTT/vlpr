@@ -1,6 +1,4 @@
-// Global utility functions
 const VLPR = {
-    // Show toast notification
     toast: function(message, type = 'info') {
         let toastContainer = document.querySelector('.toast-container');
         if (!toastContainer) {
@@ -36,7 +34,7 @@ const VLPR = {
         });
     },
     
-    // Format date
+    
     formatDate: function(dateString) {
         const date = new Date(dateString);
         return date.toLocaleDateString('en-US', {
@@ -48,7 +46,7 @@ const VLPR = {
         });
     },
     
-    // Copy to clipboard
+    
     copyToClipboard: function(text) {
         navigator.clipboard.writeText(text).then(() => {
             this.toast('Copied to clipboard!', 'success');
@@ -57,7 +55,7 @@ const VLPR = {
         });
     },
     
-    // Show loading
+    
     showLoading: function() {
         const overlay = document.createElement('div');
         overlay.className = 'spinner-wrapper';
@@ -66,7 +64,7 @@ const VLPR = {
         document.body.appendChild(overlay);
     },
     
-    // Hide loading
+    
     hideLoading: function() {
         const spinner = document.getElementById('globalSpinner');
         if (spinner) {
@@ -74,7 +72,7 @@ const VLPR = {
         }
     },
     
-    // Confirm dialog
+    
     confirm: function(message) {
         return new Promise((resolve) => {
             if (confirm(message)) {
@@ -86,9 +84,9 @@ const VLPR = {
     }
 };
 
-// Initialize on page load
+
 document.addEventListener('DOMContentLoaded', function() {
-    // Auto-hide alerts
+    
     document.querySelectorAll('.alert').forEach(alert => {
         setTimeout(() => {
             alert.classList.add('fade');
@@ -96,15 +94,15 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 5000);
     });
     
-    // Initialize tooltips
+    
     const tooltips = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     tooltips.forEach(tooltip => new bootstrap.Tooltip(tooltip));
     
-    // Add fade-in animation to elements
+   
     document.querySelectorAll('.fade-in').forEach((el, i) => {
         el.style.animationDelay = `${i * 0.1}s`;
     });
 });
 
-// Export for use in other files
+
 window.VLPR = VLPR;

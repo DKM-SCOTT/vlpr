@@ -270,10 +270,10 @@
         navigator.clipboard
           .writeText(text)
           .then(() => {
-            alert("✅ Plate number copied to clipboard!");
+            alert(" Plate number copied to clipboard!");
           })
           .catch(() => {
-            alert("❌ Failed to copy text");
+            alert("Failed to copy text");
           });
       }
 
@@ -295,7 +295,7 @@
               if (data.success) {
                 window.location.href = "{{ url_for('dashboard') }}";
               } else {
-                alert("❌ Error deleting plate");
+                alert(" Error deleting plate");
               }
             });
           modal.hide();

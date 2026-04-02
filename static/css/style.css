@@ -18,7 +18,7 @@ body {
     min-height: 100vh;
 }
 
-/* Animations */
+
 @keyframes fadeIn {
     from {
         opacity: 0;
@@ -34,7 +34,7 @@ body {
     animation: fadeIn 0.5s ease forwards;
 }
 
-/* Cards */
+
 .glass-card {
     background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
@@ -51,7 +51,7 @@ body {
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
 }
 
-/* Buttons */
+
 .btn-gradient {
     background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
     color: white;
@@ -65,7 +65,7 @@ body {
     color: white;
 }
 
-/* Loading Spinner */
+
 .spinner-wrapper {
     position: fixed;
     top: 0;
@@ -94,7 +94,7 @@ body {
     100% { transform: rotate(360deg); }
 }
 
-/* Progress Bars */
+
 .progress-sm {
     height: 6px;
     border-radius: 3px;
@@ -108,7 +108,7 @@ body {
     from { width: 0; }
 }
 
-/* Badges */
+
 .badge-gradient {
     background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
     color: white;
@@ -116,7 +116,7 @@ body {
     border-radius: 20px;
 }
 
-/* Tooltips */
+
 .tooltip-custom {
     position: relative;
     display: inline-block;
@@ -144,7 +144,7 @@ body {
     z-index: 1000;
 }
 
-/* Responsive */
+
 @media (max-width: 768px) {
     .container {
         padding: 0 20px;

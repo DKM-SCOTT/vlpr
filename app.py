@@ -46,8 +46,8 @@ if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = '/tmp/uploads'  
-app.config['PLATES_FOLDER'] = '/tmp/plates_detected'  
+app.config['UPLOAD_FOLDER'] = 'static/uploads'  
+app.config['PLATES_FOLDER'] = 'static/plates_detected'  
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
 
@@ -100,7 +100,6 @@ KENYAN_PLATE_PATTERNS = [
 ]
 
 def load_yolo_model():
-    """Load YOLOv8 model for plate detection using ultralytics"""
     global yolo_model
     try:
         
@@ -114,12 +113,10 @@ def load_yolo_model():
         if os.path.exists(model_path):
             print(f" Model file found! Loading YOLO model...")
             
-            
             yolo_model = YOLO(model_path)
             
             device = 'cpu'  
             print(f"Using device: {device}")
-            
             print(f"YOLO model loaded successfully from {model_path}")
             return True
         else:
@@ -145,30 +142,29 @@ def load_easyocr():
         print("Loading EasyOCR reader for Kenyan plates...")
         
         easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
-        print("✅ EasyOCR loaded successfully!")
+        print(" EasyOCR loaded successfully!")
         return True
     except ImportError:
-        print("⚠️ EasyOCR not installed. Installing now...")
+        print("EasyOCR not installed. Installing now...")
         try:
             import subprocess
             subprocess.check_call([sys.executable, "-m", "pip", "install", "easyocr"])
             import easyocr
             easyocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory='/tmp/easyocr')
-            print("✅ EasyOCR installed and loaded successfully!")
+            print("EasyOCR installed and loaded successfully!")
             return True
         except Exception as e:
-            print(f"⚠️ EasyOCR could not be installed: {e}")
+            print(f" EasyOCR could not be installed: {e}")
             return False
     except Exception as e:
-        print(f"⚠️ EasyOCR could not be loaded: {e}")
+        print(f" EasyOCR could not be loaded: {e}")
         return False
 
 
 print("\n" + "="*50)
-print("STARTING VLPR SYSTEM (Optimized Mode)")
+print("STARTING VLPR SYSTEM")
 print("="*50)
-print("Models will load on first detection request to save memory")
-print("="*50 + "\n")
+
 
 
 @app.route('/health')
@@ -319,13 +315,13 @@ def detect():
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 
-                print(f"✅ File saved to: {filepath}")
+                print(f" File saved to: {filepath}")
                 
                 
                 if yolo_model is None:
                     print("Loading YOLO model on-demand...")
                     if not load_yolo_model():
-                        print("❌ Failed to load YOLO model")
+                        print(" Failed to load YOLO model")
                         flash('Error loading detection model', 'danger')
                         if os.path.exists(filepath):
                             os.remove(filepath)
@@ -334,7 +330,7 @@ def detect():
                 if easyocr_reader is None:
                     print("Loading EasyOCR on-demand...")
                     if not load_easyocr():
-                        print("❌ Failed to load EasyOCR")
+                        print(" Failed to load EasyOCR")
                         flash('Error loading OCR model', 'danger')
                         if os.path.exists(filepath):
                             os.remove(filepath)
@@ -371,7 +367,7 @@ def detect():
                     flash(f'Detection failed: {result.get("error", "No license plate detected")}', 'warning')
                     return render_template('detect.html', error=True)
         except Exception as e:
-            print(f"❌ Unhandled exception in detect route: {str(e)}")
+            print(f" Unhandled exception in detect route: {str(e)}")
             import traceback
             traceback.print_exc()
             flash(f'An error occurred: {str(e)}', 'danger')
@@ -383,7 +379,6 @@ def clean_kenyan_plate_text(text):
     """Clean and format Kenyan license plate text"""
     if not text:
         return "UNKNOWN"
-    
     text = re.sub(r'[^A-Za-z0-9]', '', text.upper())
     print(f"Cleaning plate text: '{text}'")
     
@@ -427,20 +422,24 @@ def detect_plate_yolo(image_path, filename):
             return {'success': False, 'error': 'OCR not loaded'}
     
     try:
+        
         img = cv2.imread(image_path)
         if img is None:
             return {'success': False, 'error': 'Could not read image'}
         
         height, width = img.shape[:2]
         
+        
         print(f"Running YOLO inference on {image_path}...")
         results = yolo_model(image_path, verbose=False)
         
+       
         if len(results) == 0 or len(results[0].boxes) == 0:
             print("No detections from YOLO")
             del img
             gc.collect()
             return {'success': False, 'error': 'No license plate detected'}
+        
         
         boxes = results[0].boxes
         confidences = boxes.conf.cpu().numpy()
@@ -450,8 +449,8 @@ def detect_plate_yolo(image_path, filename):
         confidence = float(confidences[best_idx])
         
         x1, y1, x2, y2 = box
-        
         print(f"Plate detected with confidence: {confidence:.2f} at [{x1}, {y1}, {x2}, {y2}]")
+        
         
         padding_x = int((x2 - x1) * 0.1)
         padding_y = int((y2 - y1) * 0.1)
@@ -461,11 +460,14 @@ def detect_plate_yolo(image_path, filename):
         x2 = min(width, x2 + padding_x)
         y2 = min(height, y2 + padding_y)
         
+        
         plate_img = img[y1:y2, x1:x2].copy()
+        
         
         plate_filename = f"plate_{filename}"
         plate_path = os.path.join(app.config['PLATES_FOLDER'], plate_filename)
         cv2.imwrite(plate_path, plate_img)
+        print(f" Color plate saved: {plate_path}")
         
         
         original_display_path = os.path.join(app.config['UPLOAD_FOLDER'], f"display_{filename}")
@@ -478,30 +480,41 @@ def detect_plate_yolo(image_path, filename):
         rect_filename = f"rect_{filename}"
         rect_path = os.path.join(app.config['UPLOAD_FOLDER'], rect_filename)
         cv2.imwrite(rect_path, img_with_rect)
-        
-        
+      
         plate_text = "UNKNOWN"
         ocr_confidence = 0.0
+        gray_filename = None  
         
         if easyocr_reader is not None:
             try:
                 print("Starting OCR processing...")
                 
+                
                 if len(plate_img.shape) == 3:
                     gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+                    print("Converted color plate to grayscale")
                 else:
                     gray = plate_img
+                    print("Plate already grayscale")
                 
+                
+                gray_filename = f"gray_{filename}"
+                gray_path = os.path.join(app.config['PLATES_FOLDER'], gray_filename)
+                cv2.imwrite(gray_path, gray)
+                print(f"Grayscale plate saved at: {gray_path}")
                 
                 h, w = gray.shape
+                original_h, original_w = h, w
+                
                 if w < 200:
                     scale = 400 / max(w, 1)
                     new_w = int(w * scale)
                     new_h = int(h * scale)
                     gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                    print(f"Resized from {original_w}x{original_h} to {new_w}x{new_h} for better OCR")
+                
                 
                 print("Running EasyOCR...")
-                
                 ocr_results = easyocr_reader.readtext(
                     gray,
                     paragraph=False,
@@ -513,6 +526,7 @@ def detect_plate_yolo(image_path, filename):
                 )
                 
                 print(f"OCR returned {len(ocr_results)} results")
+                
                 
                 if ocr_results and len(ocr_results) > 0:
                     all_text = []
@@ -527,26 +541,30 @@ def detect_plate_yolo(image_path, filename):
                             print(f"  Detected: '{text}' (conf: {conf:.2f})")
                     
                     if all_text:
+                        
                         plate_text = " ".join(all_text)
                         ocr_confidence = sum(all_conf) / len(all_conf) if all_conf else 0.7
                         print(f" Combined text: '{plate_text}'")
                         
+                        
                         plate_text_before = plate_text
                         plate_text = clean_kenyan_plate_text(plate_text)
                         
-                        print(f" Before: '{plate_text_before}'")
-                        print(f" After: '{plate_text}'")
+                        print(f" Before cleaning: '{plate_text_before}'")
+                        print(f" After cleaning: '{plate_text}'")
                     else:
                         print(" Could not parse OCR results")
                         plate_text = "PARSE_ERROR"
                         ocr_confidence = 0.0
                 else:
-                    print(" No text detected")
+                    print(" No text detected by OCR")
                     plate_text = "NO_TEXT"
                     ocr_confidence = 0.0
                     
             except Exception as e:
                 print(f" OCR error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
                 plate_text = "OCR_ERROR"
                 ocr_confidence = 0.0
         else:
@@ -554,7 +572,7 @@ def detect_plate_yolo(image_path, filename):
             plate_text = "OCR_NOT_AVAILABLE"
             ocr_confidence = 0.0
         
-        
+       
         if ocr_confidence > 0:
             final_confidence = confidence * 0.4 + ocr_confidence * 0.6
         else:
@@ -563,14 +581,19 @@ def detect_plate_yolo(image_path, filename):
         
         img_with_rect2 = cv2.imread(rect_path)
         if img_with_rect2 is not None:
+           
             cv2.putText(img_with_rect2, f"Plate: {plate_text}", (x1, y1-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            
             cv2.putText(img_with_rect2, f"Conf: {final_confidence*100:.1f}%", (x1, y1-35), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            
             cv2.imwrite(rect_path, img_with_rect2)
             del img_with_rect2
         
-        
+       
         is_kenyan = False
         clean_plate = plate_text.replace(' ', '')
         for pattern in KENYAN_PLATE_PATTERNS:
@@ -578,7 +601,7 @@ def detect_plate_yolo(image_path, filename):
                 is_kenyan = True
                 break
         
-        
+       
         del img
         del plate_img
         if 'gray' in locals():
@@ -587,7 +610,8 @@ def detect_plate_yolo(image_path, filename):
             del img_with_rect
         gc.collect()
         
-        return {
+       
+        result = {
             'success': True,
             'original_image': f'/uploads/display_{filename}',
             'detected_image': f'/uploads/{rect_filename}',
@@ -598,6 +622,13 @@ def detect_plate_yolo(image_path, filename):
             'ocr_confidence': float(ocr_confidence),
             'is_kenyan_plate': is_kenyan
         }
+        
+        
+        if gray_filename:
+            result['gray_image'] = f'/plates_detected/{gray_filename}'
+            print(f" Added grayscale image to results: {result['gray_image']}")
+        
+        return result
         
     except Exception as e:
         print(f"Error in detect_plate_yolo: {type(e).__name__}: {e}")

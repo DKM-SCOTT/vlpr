@@ -2,7 +2,3 @@ venv/
 __pycache__/
 *.pyc
 .env
-instance/
-plates_detected/
-instance/
-*.db

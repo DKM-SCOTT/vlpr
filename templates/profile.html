@@ -465,10 +465,10 @@
           .then((response) => response.json())
           .then((data) => {
             if (data.success) {
-              alert("✅ Profile updated successfully!");
+              alert(" Profile updated successfully!");
               location.reload();
             } else {
-              alert("❌ " + data.message);
+              alert(" " + data.message);
             }
           });
       }
@@ -479,12 +479,12 @@
         const confirm = document.getElementById("confirmPassword").value;
 
         if (newPass !== confirm) {
-          alert("❌ New passwords do not match");
+          alert(" New passwords do not match");
           return;
         }
 
         if (newPass.length < 6) {
-          alert("❌ Password must be at least 6 characters");
+          alert(" Password must be at least 6 characters");
           return;
         }
 
@@ -501,12 +501,12 @@
           .then((response) => response.json())
           .then((data) => {
             if (data.success) {
-              alert("✅ Password changed successfully!");
+              alert(" Password changed successfully!");
               bootstrap.Modal.getInstance(
                 document.getElementById("passwordModal")
               ).hide();
             } else {
-              alert("❌ " + data.message);
+              alert(" " + data.message);
             }
           });
       }

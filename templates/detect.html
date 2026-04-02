@@ -133,7 +133,6 @@
     </style>
   </head>
   <body>
-    <!-- Store URL in data attribute for JavaScript -->
     <div
       id="app-data"
       data-detect-url="{{ url_for('detect') }}"
@@ -207,7 +206,6 @@
               </div>
               {% endfor %} {% endif %} {% endwith %}
 
-              <!-- File size warning -->
               <div class="file-size-warning" id="fileSizeWarning">
                 <i class="fas fa-exclamation-triangle me-2"></i>
                 File too large! Please select an image under 10MB.
@@ -434,11 +432,9 @@
       (function () {
         "use strict";
 
-        // Get detect URL from data attribute
         const appData = document.getElementById("app-data");
         const detectUrl = appData ? appData.dataset.detectUrl : "/detect";
 
-        // DOM Elements
         const elements = {
           imageInput: document.getElementById("image"),
           preview: document.getElementById("preview"),
@@ -456,36 +452,31 @@
           captureBtn: document.getElementById("captureBtn"),
         };
 
-        // State variables
         let cameraModalInstance = null;
         let currentStream = null;
         let currentFacingMode = "environment";
         let timeoutTimer = null;
 
-        // ========== FILE UPLOAD HANDLING ==========
         if (elements.imageInput) {
           elements.imageInput.addEventListener("change", function (e) {
             const file = e.target.files[0];
 
-            // Reset warnings
             if (elements.fileSizeWarning) {
               elements.fileSizeWarning.style.display = "none";
             }
 
             if (file) {
-              // Check file size (10MB limit)
               if (file.size > 10 * 1024 * 1024) {
                 if (elements.fileSizeWarning) {
                   elements.fileSizeWarning.style.display = "block";
                 }
-                this.value = ""; // Clear input
+                this.value = "";
                 if (elements.preview) {
                   elements.preview.style.display = "none";
                 }
                 return;
               }
 
-              // Show preview
               const reader = new FileReader();
               reader.onload = function (e) {
                 if (elements.preview) {
@@ -498,27 +489,22 @@
           });
         }
 
-        // ========== FORM SUBMISSION ==========
         if (elements.uploadForm) {
           elements.uploadForm.addEventListener("submit", function (e) {
-            // Check if file is selected
             if (!elements.imageInput || !elements.imageInput.files.length) {
               e.preventDefault();
               alert("Please select an image first");
               return;
             }
 
-            // Show loading overlay
             if (elements.loadingOverlay) {
               elements.loadingOverlay.style.display = "flex";
             }
 
-            // Disable submit button to prevent double submission
             if (elements.submitBtn) {
               elements.submitBtn.disabled = true;
             }
 
-            // Show timeout warning after 15 seconds
             timeoutTimer = setTimeout(() => {
               if (elements.timeoutWarning) {
                 elements.timeoutWarning.style.display = "block";
@@ -527,9 +513,7 @@
           });
         }
 
-        // ========== CAMERA FUNCTIONS ==========
         window.openCamera = function () {
-          // Initialize modal if not already done
           if (!cameraModalInstance && elements.cameraModal) {
             cameraModalInstance = new bootstrap.Modal(elements.cameraModal);
           }
@@ -537,7 +521,6 @@
           if (cameraModalInstance) {
             cameraModalInstance.show();
 
-            // Small delay to ensure modal is visible
             setTimeout(() => {
               startCamera(currentFacingMode);
             }, 500);
@@ -545,7 +528,6 @@
         };
 
         function startCamera(facingMode) {
-          // Stop any existing stream
           if (currentStream) {
             currentStream.getTracks().forEach((track) => {
               track.stop();
@@ -553,7 +535,6 @@
             currentStream = null;
           }
 
-          // Check browser support
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             alert(
               "Your browser does not support camera access. Please use a modern browser like Chrome, Firefox, or Safari."
@@ -578,7 +559,6 @@
                 elements.video.srcObject = stream;
               }
 
-              // Update camera type badge
               if (elements.cameraType) {
                 elements.cameraType.textContent =
                   facingMode === "environment" ? "Rear Camera" : "Front Camera";
@@ -613,7 +593,6 @@
 
               alert(errorMessage);
 
-              // Close modal if camera fails
               if (cameraModalInstance) {
                 cameraModalInstance.hide();
               }
@@ -632,11 +611,9 @@
             return;
           }
 
-          // Set canvas dimensions
           elements.canvas.width = elements.video.videoWidth;
           elements.canvas.height = elements.video.videoHeight;
 
-          // Draw video frame
           const context = elements.canvas.getContext("2d");
           context.drawImage(
             elements.video,
@@ -710,7 +687,6 @@
           );
         };
 
-        // ========== MODAL CLEANUP ==========
         if (elements.cameraModal) {
           elements.cameraModal.addEventListener("hidden.bs.modal", function () {
             if (currentStream) {
@@ -720,7 +696,6 @@
           });
         }
 
-        // ========== DRAG AND DROP SUPPORT ==========
         if (elements.uploadArea) {
           ["dragenter", "dragover", "dragleave", "drop"].forEach(
             (eventName) => {
@@ -761,7 +736,6 @@
           }
         }
 
-        // ========== CLEANUP TIMEOUT ON PAGE LOAD ==========
         window.addEventListener("load", function () {
           if (timeoutTimer) {
             clearTimeout(timeoutTimer);
@@ -774,7 +748,6 @@
           }
         });
 
-        // ========== HANDLE BACK BUTTON ==========
         window.addEventListener("pageshow", function (event) {
           if (event.persisted) {
             if (elements.loadingOverlay) {
